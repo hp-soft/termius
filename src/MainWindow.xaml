@@ -1,0 +1,49 @@
+<Window x:Class="SshManager.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
+        Title="SSH Manager" Height="680" Width="1080"
+        Background="#0f1420" WindowStyle="None" ResizeMode="CanResize"
+        WindowStartupLocation="CenterScreen">
+    
+        <shell:WindowChrome.WindowChrome>
+            <shell:WindowChrome CaptionHeight="36" ResizeBorderThickness="6"
+                                CornerRadius="0" GlassFrameThickness="0"
+                                UseAeroCaptionButtons="False" />
+        </shell:WindowChrome.WindowChrome>
+    
+        <Grid x:Name="RootGrid" Margin="6">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="36" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0" Background="#12182a">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+            
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                    <Border Width="20" Height="20" CornerRadius="6" Background="#4c8bf5" Margin="0,0,8,0">
+                        <TextBlock Text="S" Foreground="White" FontWeight="Bold" FontSize="12"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Text="SSH Manager" Foreground="#d7deec" FontSize="12.5"
+                            FontFamily="Segoe UI" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <!-- Botoes de janela (nao arrastaveis) -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" 
+                            shell:WindowChrome.IsHitTestVisibleInChrome="True">
+                        <Button x:Name="BtnMin" Click="OnMinimize" Style="{StaticResource CaptionBtn}" Content="&#xE921;" />
+                        <Button x:Name="BtnMax" Click="OnMaximize" Style="{StaticResource CaptionBtn}" Content="&#xE921;" />
+                        <Button x:Name="BtnClose" Click="OnClose" Style="{StaticResource CaptionBtnClose}" Content="&#xE8BB;" />
+                </StackPanel>
+              </Grid>
+    
+              <wv2:WebView2 x:Name="Web" Grid.Row="1" />
+        </Grid>
+</Window>

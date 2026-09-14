@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SSH Manager - Git Bash</title>
+    <link rel="stylesheet" href="vendor/xterm.css" />
+    <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+    <div class="app">
+
+        <div class="sidebar">
+            <div class="sb-head">
+                <span class="sb-title">Conexoes</span>
+                <button class="sb-collapse" title="Recolher barra lateral" onclick="toggleSidebar()">&#9776</button>
+            </div>
+            <div class="search"><input placeholder="Buscar conexao..." oninput="filterHosts(this.value)" /></div>
+            <div id="hostlist">
+                <div class="grouphdr">Local</div>
+                <div class="host local" data-name="git-bash" onclick="openGitBash()" title="Git Bash - shell local">
+                    <div class="ico">$</div>
+                    <div class="meta"><div class="name">Git Bash</div><div class="sub">shell local &middot; ConPTY</div></div>
+                    <div class="go">&#8629</div>
+                </div>
+                <div class="grouphdr" id="ssh-group-hdr" style="display:none">SSH</div>
+                <div id="ssh-list"></div>
+            </div>
+            <div class="foot"><button class="btn" onclick="openConnForm()" title="Nova Conexao SSH"><span class="btn-icon">+</span><span class="btn-label">Nova Conexao SSH</span></button></div>
+        </div>
+
+        <div class="sb-resizer" id="sb-resizer" title="Ärraste para redimensionar"></div>
+
+        <div class="Main">
+            <div class="tabs" id="tabs">
+                <div class="newtab" id="newtab" title="Nova sessao" onclick="openGitBash()">+</div>
+                <button class="tabs-appearance" title="Aparencia (tema e fonte)" onclick="toggleAppearance()">&#127912;</button>
+            </div>
+            <div class="terminals" id="terminals">
+                <div class="empty" id="empty">
+                    <div class="big">$_</div>
+                    <div>Clique em <b>Git Bash</b>a esquerda para abrir uma sessao real</div>
+                    <div style="font-size:12px">Terminal local via ConPTY &middot; abas &middot; indicador de atividade</div>
+                </div>
+            </div>
+            <div class="statusbar">
+                <span id="sb-conn">Sem sessao ativa</span>
+                <span id="sb-enc"></span>
+                <span style="margin-left:auto" class="k">SSH Manager</span>
+            </div>
+        </div>
+
+        <div class="appearance" id="appearance">
+            <div class="ap-head">
+                <span>Aparencia</span>
+                <span class="ap-x" title="Fechar" onclick="toggleAppearance()">&#10005;</span>
+            </div>
+            <div class="ap-section">
+                <div class="ap-label">Tamanho da Fonte</div>
+                <div class="ap-font">
+                    <button class="ap-fbtn" onclick="changeFont(-1)" title="Diminuir">&#8722;</button>
+                    <span class="ap-fsize" id="ap-fsize">13.5</span>
+                    <button class="ap-fbtn" onclick="changeFont(1)" title="Aumentar">+</button>
+                    <button class="ap-fbreset" onclick="resetFont()" title="Restaurar padrao">reset</button>
+                </div>
+            </div>
+            <div class="ap-section">
+                <div class="ap-label">Tema</div>
+                <div class="ap-themes" id="ap-themes"></div>
+            </div>
+            <div class="ap-note" id="ap-note">Aplica a sessao em foco</div>
+        </div>
+    </div>
+
+    <div class="overlay" id="overlay" onclick="if(event.target==this)closeConnForm()">
+        <div class="modal">
+            <div class="modal-hd">
+                <span id="modal-title">Nova conexao SSH</span>
+                <span class="modal-x" onclick="closeConnForm()">&#10005</span>
+            </div>
+            <div class="model-hd">
+                <input type="hidden" id="f-id" />
+                <label>
+                    Nome
+                    <input id="f-name" placeholder="ex.: Server XYZ" autocomplete="off" />
+                </label>
+                <div class="row">
+                    <label class="grow">
+                        Host / IP
+                        <input id="f-host" placeholder="10.0.4.21 ou host.exemplo.com" autocomplete="off" />
+                    </label>
+                    <label class="w-port">
+                        Port
+                        <input id="f-port" type="number" value="22" min="1" max="65535" />
+                    </label>
+                </div>
+                <div class="row">
+                    <label class="grow">
+                        Usuario
+                        <input id="f-user" placeholder="ex: admin" autocomplete="off" />
+                    </label>
+                    <label class="w-theme">
+                        Tema
+                        <select id="f-theme">
+                            <option value="default">Padrao</option>
+                            <option value="dracula">Dracula</option>
+                            <option value="nord">Nord</option>
+                            <option value="solarized">Solarized</option>
+                            <option value="matrix">Matrix</option>
+                            <option value="amber">Amber</option>
+                            <option value="gruvbox">Gruvbox</option>
+                        </select>
+                    </label>
+                </div>
+
+                <div class="auth-tabs">
+                    <button type="button" class="auth-tab active" data-auth="password" onclick="setAuth('password')">Senha</button>
+                    <button type="button" class="auth-tab" data-auth="key" onclick="setAuth('key')">Chave</button>
+                </div>
+
+                <div id="auth-password">
+                    <label>Senha
+                        <div class="pw-wrap">
+                            <input id="f-password" type="password" placeholder="Deixe em branco para nao salvar" autocomplete="new-password" />
+                            <button type="button" class="pw-eye" onclick="togglePw()" title="Mostrar/Ocultar">&#128065</button>
+                        </div>
+                    </label>
+                    <div class="hint">Password just stored. SSH will ask again on Connect</div>
+                </div>
+
+                <div id="auth-key" style="display:none">
+                    <label>Chave Privada
+                        <div class="row">
+                            <input id="f-key" class="grow" placeholder="c:\users\voce\.ssh\id_rsa" autocomplete="off" />
+                            <button type="button" class="btn-sec" onclick="pickKey()">Procurar...</button>
+                        </div>
+                    </label>
+                    <div class="hint">Caminho do arquivo de chave privada</div>
+                </div>
+
+
+            </div>
+
+            <div class="modal-ft">
+                <button type="button" class="btn-ghost" id="btn-delete" onclick="deleteConn()" style="display:none">Excluir</button>
+                <span class="spacer"></span>
+                <button type="button" class="btn-ghost" onclick="closeConnForm()">Cancelar</button>
+                <button type="button" class="btn-primary" onclick="saveConn()">Salvar</button>
+            </div>
+        </div>
+    </div>
+
+
+    <div class="overlay" id="overlay" onclick="if(event.target===this)closeSnipForm()">
+        <div class="modal">
+            <div class="modal-hd">
+                <span id="snip-modal-title">Nova snippet</span>
+                <span class="modal-x" onclick="closeSnipForm()">&#10005</span>
+            </div>
+            <div class="modal-hd">
+                <input type="hidden" id="sf-id" />
+                <label>
+                    Nome
+                    <input id="sf-name" placeholder="Service Restart" autocomplete="off" />
+                </label>
+                <label>
+                    Comandos
+                    <textarea if="sf-cmds" rows="8" spellcheck="false"
+                              placeholder="Um comando por linha. Ex:;&#10;cd /var/log&#10;tail -n 100 -f app.log"></textarea>
+                </label>
+                <div class="hint">Cada linha enviar para o terminal</div>
+            </div>
+
+            <div class="modal-ft">
+                <button type="button" class="btn-ghost" id="sf-delete" onclick="deleteSnippetFromForm()" style="display:none">Excluir</button>
+                <span class="spacer"></span>
+                <button type="button" class="btn-ghost" onclick="closeSnipForm()">Cancelar</button>
+                <button type="button" class="btn-primary" onclick="saveSnippet()">Salvar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="vendor/xterm.js"></script>
+    <script src="vendor/addon-fit.js"></script>
+    <script src="renderer.js"></script>
+</body>
+</html>
