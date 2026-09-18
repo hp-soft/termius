@@ -18,7 +18,7 @@ public partial class MainWindow : Window
 	private readonly ConnectionStore _store = new();
 	private readonly FolderStore _folders = new();
 	private readonly SnippetStore _snippets = new();
-	private readonly PrefStore _prefs = new();
+	private readonly PrefsStore _prefs = new();
 
 	public MainWindow()
 	{

@@ -9,7 +9,7 @@ public sealed class Prefs
     public double FontSize { get; set; } = 13.5;
 }
 
-public sealed class PrefStore
+public sealed class PrefsStore
 {
     private static readonly string Dir =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SshManager");

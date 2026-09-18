@@ -1,4 +1,4 @@
-using System;
+//using System;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -48,7 +48,7 @@ public sealed class ConPty : IDisposable
 							_outputWrite!.DangerousGetHandle(), 0, out _hPC);
 		try { Output?.Invoke($"[log] CreatePseudoConsole hr={hr} hPC=0x{_hPC.ToString("X")}" + "\r\n"); } catch { }
 		if(hr != 0)
-			throw new Win32Exception(hr, "CreatePseudoConsole");
+			throw new Win32Exception(hr, "CreatePseudoConsole failed");
 				
 		// STARTUPINFOEX com o atributo que anexa o processo ao pseudo-console
 		var siEx = new STARTUPINFOEX();
@@ -237,8 +237,8 @@ public sealed class ConPty : IDisposable
 		public string? lpReserved;
 		public string? lpDesktop;
 		public string? lpTitle;
-		public int dwX, dwY, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
-		public short wShowWindow, cbReserverd2;
+		public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+		public short wShowWindow, cbReserved2;
 		public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
 	}
 	

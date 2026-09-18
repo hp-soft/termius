@@ -50,7 +50,7 @@ function renderFolderMenu(sid) {
     if (!menu) return;
     let html = '';
     if (folders.length === 0) {
-        html += 'div class="fm-empty">Nenhuma pasta favorita</div>';
+        html += '<div class="fm-empty">Nenhuma pasta favorita</div>';
     } else {
         folders.forEach(p => {
             html += '<div class="fm-item" data-path="' + encodeURIComponent(p) + '">' +
@@ -75,7 +75,7 @@ function renderFolderMenu(sid) {
 }
 
 function toggleFolderMenu(sid) {
-    const s = session[sid];
+    const s = sessions[sid];
     if (!s) return;
     const menu = s.paneEl.querySelector('.folder-menu');
     const isOpen = menu.classList.contains('open');
@@ -114,11 +114,11 @@ function renderSnipMenu(sid) {
     const menu = s.paneEl.querySelector('.snip-menu');
     if (!menu) return;
     let html = '';
-    if (snippet.length == 0) {
+    if (snippets.length == 0) {
         html += '<div class="fm-empty">Nenhum snippet salvo</div>';
     } else {
         folders.forEach(sn => {
-            html += '<div class="fm-item snip-item" data-path="' + sn.Id + '">' +
+            html += '<div class="fm-item snip-item" data-id="' + sn.Id + '">' +
                 '<span class="fm-path"></span>' +
                 '<span class="snip-edit" title="Editar">&#9998;</span>' +
                 '<span class="fm-del" title="Remover">&#10005;</span>' +
@@ -130,6 +130,7 @@ function renderSnipMenu(sid) {
 
     menu.querySelectorAll('.snip-item').forEach(it => {
         const sn = snippets.find(x => x.Id === it.dataset.id);
+        if (!sn) return;
         it.querySelector('.fm-path').textContent = sn.Name || '(sem nome)';
         it.querySelector('.fm-path').title = sn.Commands || '';
         it.querySelector('.fm-path').onclick = () => runSnippet(sid, sn);
@@ -177,7 +178,7 @@ function toggleSnipMenu(sid) {
     const isOpen = menu.classList.contains('open');
     closeSnipMenu();
     if (!isOpen) {
-        renderSnipMenu();
+        renderSnipMenu(sid);
         menu.classList.add('open');
         openSnipSid = sid;
     }
@@ -272,7 +273,7 @@ function showVendorError() {
     document.getElementById('empty').style.display = 'none';
     document.getElementById('terminals').insertAdjacentHTML('beforeend',
         '<div class="term active" style="padding:24px;color:#ff9d9d;font-family:var(--mono);' +
-        'font-size:13px;line-height:1.6;white-space:pre-wrap;">' +
+        'font-size:13px;line-height:1.6;white-space:pre-wrap">' +
         'xterm.js nao encontrado em web/vendor/\n\nFaltam: vendor/xterm.js, vendor/xterm.css, ' +
         'vendor/addon-fit.js\n\nVeja web/vendor/README.md</div>');
 }
@@ -314,7 +315,7 @@ function makePane(spec) {
     // dropdown snippets
     bar.querySelector('[data-act="snippets"]').onclick = (e) => {
         e.stopPropagation();
-        toggleSnippetMenu(sid);
+        toggleSnipMenu(sid);
     };
 
     // seletor de tema
@@ -343,7 +344,7 @@ function makePane(spec) {
     const term = new Terminal({
         fontFamily: '"Cascadia Code", "Consolas", monospace',
         fontSize: spec.fontSize || DEFAULT_FONT, cursorBlink: true, theme: themeOptions(spec.theme),
-        scrollback: 10000  // Linhas de historico
+        scrollback: 10000,  // Linhas de historico
     });
 
     const fit = new FitAddon.FitAddon();
@@ -355,7 +356,7 @@ function makePane(spec) {
     // Comportamento estilo Putty
     termEl.addEventListener('mouseup', () => {
         const sel = term.getSelection();
-        if (sel && sel.length > 0) copyText(sel);
+        if (sel && sel.length) copyText(sel);
     });
     // Botao direito
     termEl.addEventListener('contextmenu', (e) => {
@@ -713,12 +714,12 @@ if (bridge) {
             // reabre o menu que estava aberto (se houver) para refletir mudancas
             if (openFolderSid && sessions[openFolderSid]) renderFolderMenu(openFolderSid);
         } else if (m.type === 'snippets') {
-            snippets = m.Items || [];
+            snippets = m.items || [];
             if (openSnipSid && sessions[openSnipSid]) renderSnipMenu(openSnipSid);
         } else if (m.type === 'prefs') {
             if (m.theme && THEMES[m.theme]) prefs.theme = m.theme;
             if (m.fontSize) prefs.fontSize = m.fontSize;
-        } else if (m.type == 'keyPicked') {
+        } else if (m.type === 'keyPicked') {
             document.getElementById('f-key').value = m.path;
         } else if (m.type === 'connSaved') {
             closeConnForm();
@@ -736,10 +737,6 @@ function renderConns(items) {
     document.getElementById('ssh-group-hdr').style.display = items.length ? '' : 'none';
     list.innerHTML = '';
     items.forEach(c => {
-        const list = document.getElementById('ssh-list');
-        document.getElementById('ssh-group-hdr').style.display = items.length ? '' : 'none';
-        list.innerHTML = '';
-        items.forEach(c => {
             const row = document.createElement('div');
             row.className = 'host ssh';
             row.dataset.name = c.Name || c.Host;
@@ -754,7 +751,6 @@ function renderConns(items) {
             row.querySelector('.edit').onclick = (e) => { e.stopPropagation(); openConnForm(c.Id); };
             list.appendChild(row);
         });
-    });
 }
 
 function openConnForm(connId) {
@@ -900,8 +896,8 @@ window.addEventListener('keydown', e => {
     if (e.key === 'Escape' && document.getElementById('snip-overlay').classList.contains('show')) closeSnipForm();
     // Ctlr+Shift+D: Dividir vertical (lado a lado); Ctrl+Shift+E: horizontal (empilhado)
     if (e.ctrlKey && e.shiftKey && focusedPane) {
-        if (e.key == 'D' || e.key === 'd') { e.preventDefault(); splitPane(focusedPane, 'h'); }
-        if (e.key == 'E' || e.key === 'e') { e.preventDefault(); splitPane(focusedPane, 'v'); }
+        if (e.key === 'D' || e.key === 'd') { e.preventDefault(); splitPane(focusedPane, 'h'); }
+        if (e.key === 'E' || e.key === 'e') { e.preventDefault(); splitPane(focusedPane, 'v'); }
     }
 });
 

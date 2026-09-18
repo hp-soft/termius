@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 
-<html lang="pt-br">
+<html lang="pt-BR">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SSH Manager - Git Bash</title>
-    <link rel="stylesheet" href="vendor/xterm.css" />
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="vendor/xterm.css">
+    <link rel="stylesheet" href="styles.css">
 </head>
 
 <body>
@@ -17,7 +17,7 @@
                 <span class="sb-title">Conexoes</span>
                 <button class="sb-collapse" title="Recolher barra lateral" onclick="toggleSidebar()">&#9776</button>
             </div>
-            <div class="search"><input placeholder="Buscar conexao..." oninput="filterHosts(this.value)" /></div>
+            <div class="search"><input placeholder="Buscar conexao..." oninput="filterHosts(this.value)"></div>
             <div id="hostlist">
                 <div class="grouphdr">Local</div>
                 <div class="host local" data-name="git-bash" onclick="openGitBash()" title="Git Bash - shell local">
@@ -63,7 +63,7 @@
                     <button class="ap-fbtn" onclick="changeFont(-1)" title="Diminuir">&#8722;</button>
                     <span class="ap-fsize" id="ap-fsize">13.5</span>
                     <button class="ap-fbtn" onclick="changeFont(1)" title="Aumentar">+</button>
-                    <button class="ap-fbreset" onclick="resetFont()" title="Restaurar padrao">reset</button>
+                    <button class="ap-freset" onclick="resetFont()" title="Restaurar padrao">reset</button>
                 </div>
             </div>
             <div class="ap-section">
@@ -78,10 +78,10 @@
         <div class="modal">
             <div class="modal-hd">
                 <span id="modal-title">Nova conexao SSH</span>
-                <span class="modal-x" onclick="closeConnForm()">&#10005</span>
+                <span class="modal-x" onclick="closeConnForm()">&#10005;</span>
             </div>
-            <div class="model-hd">
-                <input type="hidden" id="f-id" />
+            <div class="modal-hd">
+                <input type="hidden" id="f-id">
                 <label>
                     Nome
                     <input id="f-name" placeholder="ex.: Server XYZ" autocomplete="off" />
@@ -123,7 +123,7 @@
                 <div id="auth-password">
                     <label>Senha
                         <div class="pw-wrap">
-                            <input id="f-password" type="password" placeholder="Deixe em branco para nao salvar" autocomplete="new-password" />
+                            <input id="f-password" type="password" placeholder="Deixe em branco para nao salvar" autocomplete="new-password">
                             <button type="button" class="pw-eye" onclick="togglePw()" title="Mostrar/Ocultar">&#128065</button>
                         </div>
                     </label>
@@ -133,7 +133,7 @@
                 <div id="auth-key" style="display:none">
                     <label>Chave Privada
                         <div class="row">
-                            <input id="f-key" class="grow" placeholder="c:\users\voce\.ssh\id_rsa" autocomplete="off" />
+                            <input id="f-key" class="grow" placeholder="c:\users\voce\.ssh\id_rsa" autocomplete="off">
                             <button type="button" class="btn-sec" onclick="pickKey()">Procurar...</button>
                         </div>
                     </label>
@@ -153,17 +153,17 @@
     </div>
 
 
-    <div class="overlay" id="overlay" onclick="if(event.target===this)closeSnipForm()">
+    <div class="overlay" id="snip-overlay" onclick="if(event.target===this)closeSnipForm()">
         <div class="modal">
             <div class="modal-hd">
                 <span id="snip-modal-title">Nova snippet</span>
-                <span class="modal-x" onclick="closeSnipForm()">&#10005</span>
+                <span class="modal-x" onclick="closeSnipForm()">&#10005;</span>
             </div>
             <div class="modal-hd">
-                <input type="hidden" id="sf-id" />
+                <input type="hidden" id="sf-id">
                 <label>
                     Nome
-                    <input id="sf-name" placeholder="Service Restart" autocomplete="off" />
+                    <input id="sf-name" placeholder="Service Restart" autocomplete="off">
                 </label>
                 <label>
                     Comandos
