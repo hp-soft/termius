@@ -67,22 +67,10 @@ public sealed class ConPty : IDisposable
 		}
 		try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(init) succeeded, lpAttributeList=0x{siEx.lpAttributeList.ToString("X")}\r\n"); } catch { }
 				
-		// Update the attribute list with a pointer to the pseudo-console handle.
-		// The API expects a pointer to the handle, not the handle value itself.
-		IntPtr pValue = IntPtr.Zero;
-		try
-		{
-			pValue = Marshal.AllocHGlobal(IntPtr.Size);
-			Marshal.WriteIntPtr(pValue, _hPC);
-			if (!UpdateProcThreadAttribute(siEx.lpAttributeList, 0,
-				(IntPtr)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, pValue, (IntPtr)IntPtr.Size,
-				IntPtr.Zero, IntPtr.Zero))
-				throw new Win32Exception(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute failed");
-		}
-		finally
-		{
-			if (pValue != IntPtr.Zero) Marshal.FreeHGlobal(pValue);
-		}
+		if (!UpdateProcThreadAttribute(siEx.lpAttributeList, 0,
+			(IntPtr)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, _hPC, (IntPtr)IntPtr.Size,
+			IntPtr.Zero, IntPtr.Zero))
+			throw new Win32Exception(Marshal.GetLastWin32Error(), "UpdateProcThreadAttribute failed");
 					
 		// Cria processo shell
 		var pSec = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>() };
@@ -121,7 +109,9 @@ public sealed class ConPty : IDisposable
 
 		try { Output?.Invoke($"[log] exe={exePath} args={args}\r\n"); } catch { }
 
-		var argsBuilder = new System.Text.StringBuilder(args ?? string.Empty);
+		var quotedExe = exePath.Contains(' ') ? $"\"{exePath}\"" : exePath;
+		var fullCmd = string.IsNullOrWhiteSpace(args) ? quotedExe : $"{quotedExe} {args}";
+		var argsBuilder = new System.Text.StringBuilder(fullCmd);
 
 		bool ok = false;
 		try

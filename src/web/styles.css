@@ -87,7 +87,7 @@ html, body {
 	flex: 1
 }
 
-.sb-collapsed {
+.sb-collapse {
 	width:26px;
 	height:26px;
 	border:0;
@@ -98,7 +98,7 @@ html, body {
 	font-size:14px
 }
 
-.sb-collapsed:hover {
+.sb-collapse:hover {
 	background: var(--panel);
 	color: var(--txt)
 }
@@ -138,8 +138,8 @@ html, body {
 .sidebar .search input:focus {
 	border-color: var(--accent)
 }
-#hotlist {
-	overflow-y: auto;flex:1
+#hostlist {
+	overflow-y: auto;flex:1;min-height:0;
 }
 .grouphdr {
 	padding: 6px 10px 3px;
@@ -427,7 +427,7 @@ html, body {
 	border:1px solid transparent
 }
 
-.pane-focused {
+.pane.focused {
 	border-color:rgba(76,139,245,.5)
 }
 
@@ -1000,7 +1000,7 @@ html, body {
 	font-size:13px;
 }
 
-.ap-fbreset {
+.ap-freset {
 	margin-left:auto;
 	padding:4px 8px;
 	border:1px solid var(--border);

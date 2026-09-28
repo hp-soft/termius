@@ -11,6 +11,27 @@ using SshManager.Pty;
 using SshManager.Storage;
 
 namespace SshManager;
+internal static class Log
+{
+    private static readonly object _lock = new object();
+    public static string FileLocation { get; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SshManager.log");
+
+    public static void Write(string message)
+    {
+        try
+        {
+            lock (_lock)
+            {
+                File.AppendAllText(FileLocation, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}");
+            }
+        }
+        catch
+        {
+            // Falha no log não deve quebrar a aplicação — opcional: tratar/expôr erro
+        }
+    }
+}
 
 public partial class MainWindow : Window
 {
@@ -94,11 +115,50 @@ public partial class MainWindow : Window
 
 	private async void OnLoaded(object sender, RoutedEventArgs e)
 	{
-		var userData = Path.Combine(Path.GetTempPath(), "SshManager.WebView2");
-		var env = await CoreWebView2Environment.CreateAsync(null, userData);
-		await Web.EnsureCoreWebView2Async(env);
+		//var userData = Path.Combine(Path.GetTempPath(), "SshManager.WebView2");
+		//var env = await CoreWebView2Environment.CreateAsync(null, userData);
+		try
+		{
+			await InitializeWebViewAsync();
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(
+				"Falha ao inicializar o WebView2:\r\n\r\n" + ex.Message +
+				"\r\n\r\nVerifique se o WebView2 Runtime esta instalado",
+				"RTermius",
+				MessageBoxButton.OK,
+				MessageBoxImage.Error
+				);
+			Close();
+		};
+	}
+
+	private async Task InitializeWebViewAsync()
+	{
+		var baseUserData = Path.Combine(Path.GetTempPath(), "SshManager.WebView2");
+		CoreWebView2Environment env;
+
+		try
+		{
+            env = await CoreWebView2Environment.CreateAsync(null, baseUserData);
+            await Web.EnsureCoreWebView2Async(env);
+        } 
+		catch (COMException)
+		{
+			var fallback = Path.Combine(baseUserData, "instances",
+				Environment.ProcessId.ToString());
+			env = await CoreWebView2Environment.CreateAsync(null, fallback);
+			await Web.EnsureCoreWebView2Async(env);
+		}
 
 		Web.CoreWebView2.WebMessageReceived += OnWebMessage;
+		// Abrir DevTools automaticamente para depuração (remover após diagnosticar)
+		try { Web.CoreWebView2.OpenDevToolsWindow(); } catch { }
+
+
+		Web.CoreWebView2.Settings.AreDevToolsEnabled = true;
+
 
         // Concede automaticamente o acesso ao clipboard para a origem local
         // (necessario para o paste com botao direito via navigator.clipboard)
@@ -128,7 +188,13 @@ public partial class MainWindow : Window
 			{
 				case "start": StartSession(id, root); break;
 				case "startSsh": StartSsh(id, root); break;
-				case "input": if (_sessions.TryGetValue(id, out var p)) p.Write(root.GetProperty("data").GetString() ?? ""); break;
+				case "input":
+					{
+						var data = root.GetProperty("data").GetString() ?? "";
+						Console.WriteLine($"[ws->host] input id={id} len={data.Length}");
+						if (_sessions.TryGetValue(id, out var p)) p.Write(data);
+						break;
+					}
 				case "resize":
 					{
 						if (_sessions.TryGetValue(id, out var r))
@@ -145,14 +211,46 @@ public partial class MainWindow : Window
 				case "pickKey": PickKey(); break;
 
 				case "loadFolders": SendFolders(); break;
-				case "addFolder": _folders.Add(root.GetProperty("path").GetString() ?? ""); SendConns(); break;
-				case "removeFolder": _folders.Remove(root.GetProperty("path").GetString() ?? ""); SendConns(); break;
+				case "addFolder": _folders.Add(root.GetProperty("path").GetString() ?? ""); SendFolders(); break;
+				case "removeFolder": _folders.Remove(root.GetProperty("path").GetString() ?? ""); SendFolders(); break;
 
 				case "loadSnippets": SendSnippets(); break;
 				case "saveSnippet": SaveSnippet(root); break;
 				case "deleteSnippet": _snippets.Remove(root.GetProperty("snippetId").GetString() ?? ""); SendSnippets(); break;
 
 				case "loadPrefs": SendPrefs(); break;
+			case "requestPaste":
+			{
+				string txt = "";
+				try
+				{
+					Dispatcher.Invoke(() => { if (Clipboard.ContainsText()) txt = Clipboard.GetText(); });
+				}
+				catch { }
+				var msg = $"[requestPaste] id={id} len={(txt ?? "").Length}";
+				Console.WriteLine(msg);
+			// If the session is active on the host, write directly to the pty to avoid extra roundtrips.
+			if (_sessions.TryGetValue(id, out var pty))
+			{
+				try
+				{
+					pty.Write(txt ?? "");
+					Console.WriteLine($"[requestPaste] wrote { (txt ?? "").Length } bytes directly to session {id}");
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine($"[requestPaste] failed to write to session {id}: {ex.Message}");
+					// fallback to sending to web UI so it can forward
+					PostToWeb(new { type = "paste", id = id, data = txt });
+				}
+			}
+			else
+			{
+				// session not present on host side, forward to UI which may handle routing
+				PostToWeb(new { type = "paste", id = id, data = txt });
+			}
+				break;
+			}
 				case "savePrefs": SavePrefs(root); break;
 			}
 		}
@@ -210,19 +308,26 @@ public partial class MainWindow : Window
 	{
 		var pty = new ConPty();
 		pty.Output += data => PostToWeb(new { type = "data", id, data });
-		pty.Exited += code => PostToWeb(new { type = "exit", id, code });
-		try
+		pty.Exited += code =>
+		{
+			Log.Write($"[{id}] processo encerrado, codigo={code}\n");
+			PostToWeb(new { type = "exit", id, code });
+		};
+        Log.Write($"[{id}] Spawn: {command} (cwd={cwd} cols={cols} rows={rows})");
+        try
 		{
 			pty.Start(command, cwd, cols, rows);
 			_sessions[id] = pty;
 		}
-		catch (Win32Exception ex)
+		catch (Exception ex)
 		{
 			// Report detailed error to the frontend and console for diagnostics
-			var msg = $"CreateProcess failed: {ex.Message} (NativeErrorCode={ex.NativeErrorCode} Command={command})";
+			var native = ex is Win32Exception w ? $" NativeErrorCode={w.NativeErrorCode}" : "";
+			var msg = $"Falha Iniciar processo: {ex.Message}{native} Command={command})";
 			PostToWeb(new { type = "error", message = msg });
-			try { PostToWeb(new { type = "data", id, data = $"\r\n[error] {msg}\r\n" }); } catch { }
-			Console.WriteLine(msg);
+			const string esc = "\x1b";
+			try { PostToWeb(new { type = "data", id, data = $"\r\n{esc}[31m[error] {msg}{esc}[0m\r\n" }); } catch { }
+			Log.Write(msg);
 		}
 	}
 
@@ -264,7 +369,7 @@ public partial class MainWindow : Window
 		var id = s.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
 		var snip = (!string.IsNullOrEmpty(id) ? _snippets.Items.FirstOrDefault(x => x.Id == id) : null)
 				   ?? new Snippet();
-		snip.Name = Str(s, "Name");
+		snip.Name = Str(s, "name");
 		snip.Commands = Str(s, "commands");
 		_snippets.Upsert(snip);
 		SendSnippets();

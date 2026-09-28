@@ -6,6 +6,24 @@ let focusedPane = null;
 let seq = 0, tabSeq = 0;
 function post(msg) { if (bridge) bridge.postMessage(msg); }
 
+// Coalesce expensive fit.fit() calls per-session to avoid forced reflow storms.
+// scheduleFit(s) will requestAnimationFrame once and emit a single resize message.
+function scheduleFit(s) {
+    if (!s) return;
+    if (s._fitPending) return;
+    s._fitPending = true;
+    requestAnimationFrame(() => {
+        s._fitPending = false;
+        try { s.fit.fit(); post({ type: 'resize', id: s.sid, cols: s.term.cols, rows: s.term.rows }); } catch (_) { }
+    });
+}
+function scheduleFitBySid(sid) {
+    const s = sessions[sid];
+    if (s) return scheduleFit(s);
+    // If session not created yet, try once on next tick.
+    setTimeout(() => { const s2 = sessions[sid]; if (s2) scheduleFit(s2); }, 0);
+}
+
 function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).catch(() => execCopy(text));
@@ -26,10 +44,32 @@ function execCopy(text) {
 }
 
 function pasteInto(sid) {
-    const send = (txt) => { if (txt) post({ type: 'input', id: sid, data: txt }); };
+    const send = (txt) => { if (txt) sendInputChunked(sid, txt); };
     if (navigator.clipboard && navigator.clipboard.readText) {
         navigator.clipboard.readText().then(send).catch(() => { });
     }
+}
+
+// Send large input in small chunks to avoid long on-frame JS work and reduce forced reflows
+function sendInputChunked(id, text) {
+    if (!text || text.length === 0) return;
+    const CHUNK = 1024; // chars per frame
+    if (text.length <= CHUNK) {
+        try { console.log('[ui] sending input single chunk id=', id, 'len=', text.length); } catch(_){}
+        post({ type: 'input', id: id, data: text });
+        return;
+    }
+    try { console.log('[ui] sending input chunked id=', id, 'totalLen=', text.length); } catch(_){}
+    let pos = 0;
+    function sendNext() {
+        const end = Math.min(pos + CHUNK, text.length);
+        const piece = text.substring(pos, end);
+        try { post({ type: 'input', id: id, data: piece }); } catch(_){}
+        pos = end;
+        if (pos < text.length) requestAnimationFrame(sendNext);
+        else try { console.log('[ui] finished sending input chunks id=', id); } catch(_){}
+    }
+    requestAnimationFrame(sendNext);
 }
 
 let folders = [];
@@ -117,7 +157,7 @@ function renderSnipMenu(sid) {
     if (snippets.length == 0) {
         html += '<div class="fm-empty">Nenhum snippet salvo</div>';
     } else {
-        folders.forEach(sn => {
+        snippets.forEach(sn => {
             html += '<div class="fm-item snip-item" data-id="' + sn.Id + '">' +
                 '<span class="fm-path"></span>' +
                 '<span class="snip-edit" title="Editar">&#9998;</span>' +
@@ -142,7 +182,7 @@ function renderSnipMenu(sid) {
 
 function editSnippet(sn) {
     closeSnipMenu();
-    document.getElementById('snip-model-title').textContent = sn ? 'Editar snippet' : 'Novo snippet';
+    document.getElementById('snip-modal-title').textContent = sn ? 'Editar snippet' : 'Novo snippet';
     document.getElementById('sf-id').value = sn ? sn.Id : '';
     document.getElementById('sf-name').value = sn ? (sn.Name || '') : '';
     document.getElementById('sf-cmds').value = sn ? (sn.Commands || '') : '';
@@ -245,12 +285,46 @@ const THEMES = {
         bg: '#2b3339', fg: '#d3c6aa', cursor: '#d3c6aa', sel: '#31424a',
         ansi: ['#2b3339','#e67e80','#a7c080','#dbbc7f','#7fbbb3','#d699b6','#83c092','#d3c6aa','#657070','#e78a84','#b7d3a8','#e2c58a','#9fd5ce','#e5b6cf','#9fd7b6','#ffffff']
     },
+    amber: {
+        label: 'Amber',
+        bg: '#2b1700', fg: '#ffd8a6', cursor: '#ffb86b', sel: '#3a2200',
+        ansi: ['#2b1700','#ff7043','#ff8a50','#ffb86b','#ff954f','#ff7a5f','#ffad66','#ffd8a6','#5a2b00','#ff8b59','#ffb07a','#ffd59a','#ffd2a6','#ffc1a8','#ffe0b3','#ffffff']
+    },
+    matrix: {
+        label: 'Matrix',
+        bg: '#000000', fg: '#00ff44', cursor: '#00ff44', sel: '#002200',
+        ansi: ['#000000','#00ff44','#00aa00','#55ff55','#00ff99','#00ff66','#00cccc','#aaffaa','#444444','#66ff88','#99ff99','#bbffbb','#99ffcc','#88ffbb','#66ffff','#ffffff']
+    },
+    blue: {
+        label: 'Blue',
+        bg: '#001f3f', fg: '#cfeeff', cursor: '#cfeeff', sel: '#02263a',
+        ansi: ['#001f3f','#ff6b6b','#74d67a','#ffd86b','#4aa3ff','#c27aff','#4bd6ff','#d6ecff','#455b6b','#ff8a8a','#a8e6b0','#ffe6a6','#7fbfff','#e0b7ff','#9ff3ff','#ffffff']
+    },
+    green: {
+        label: 'Green',
+        bg: '#07260a', fg: '#d8f6dc', cursor: '#d8f6dc', sel: '#0b2f0d',
+        ansi: ['#07260a','#ff6b6b','#7bd389','#ffd86b','#6fbfff','#c27aff','#4bd6ff','#dff4e0','#3b5b40','#ff8a8a','#9fe6b8','#ffe6a6','#9fcfff','#e0b7ff','#9ff3ff','#ffffff']
+    },
+    red: {
+        label: 'Red',
+        bg: '#2b0a0a', fg: '#ffd6d6', cursor: '#ffd6d6', sel: '#3a0f0f',
+        ansi: ['#2b0a0a','#ff6b6b','#98be65','#ecbe7b','#51afef','#c678dd','#46d9ff','#ffd6d6','#544040','#ff7b7b','#b7d3a8','#e2c58a','#7ec0ff','#d4bfff','#7aefff','#ffffff']
+    },
+    flexoki: {
+        label: 'Flexoki',
+        bg: '#0f1226', fg: '#dfe7ff', cursor: '#ffd479', sel: '#1b2238',
+        ansi: ['#0f1226','#ff6b6b','#8be58b','#ffd86b','#6aa8ff','#d6a9ff','#4bd6ff','#dfe7ff','#46506a','#ff8a8a','#b7e6b7','#ffe6a6','#9fcfff','#e7caff','#bff3ff','#ffffff']
+    },
     nightowl: {
         label: 'Night Owl',
         bg: '#011627', fg: '#d6deeb', cursor: '#d6deeb', sel: '#01243b',
         ansi: ['#011627','#ef5350','#21c7a8','#ffd866','#82aaff','#c792ea','#7fdbca','#a7b9cc','#2b3a42','#ff6b6b','#3be0b5','#fff29b','#a1c2ff','#d1a3ff','#bff0de','#ffffff']
     }
 };
+
+function themeEntries() {
+    return Object.entries(THEMES).filter(([k]) => k !== 'default');
+}
 
 function themeOptions(name) {
     const t = THEMES[name] || THEMES.default;
@@ -320,7 +394,7 @@ function makePane(spec) {
 
     // seletor de tema
     const sel = bar.querySelector('.pane-theme');
-    Object.entries(THEMES).forEach(([k, v]) => {
+    themeEntries().forEach(([k, v]) => {
         const opt = document.createElement('option');
         opt.value = k; opt.textContent = v.label;
         if (k === (spec.theme || 'default')) opt.selected = true;
@@ -367,17 +441,84 @@ function makePane(spec) {
     // refir automatico (janela, split, troca de aba)
     const ro = new ResizeObserver(() => {
         if (!paneEl.isConnected || paneEl.offsetParent === null) return;
-        try { fit.fit(); post({ type: 'resize', id: sid, cols: term.cols, rows: term.rows }); } catch (_) { }
+        scheduleFitBySid(sid);
     });
     ro.observe(termEl);
 
     sessions[sid] = { sid, term, fit, ro, paneEl, termEl, tabId: null, spec, alive:true };
 
     // arranca o ConPTY
-    requestAnimationFrame(() => {
-        try { fit.fit(); } catch (_) { }
-        post(Object.assign({}, spec.startMsg, { id: sid, cols: term.cols || 80, rows: term.rows || 24 }));
+    // Envia start imediatamente, mas agenda o fit para um momento menos prioritário
+    // para evitar trabalho pesado no primeiro requestAnimationFrame.
+    post(Object.assign({}, spec.startMsg, { id: sid, cols: term.cols || 80, rows: term.rows || 24 }));
+    if (typeof window !== 'undefined' && window.requestIdleCallback) {
+        try { window.requestIdleCallback(() => scheduleFitBySid(sid), { timeout: 200 }); } catch (_) { setTimeout(() => scheduleFitBySid(sid), 120); }
+    } else {
+        setTimeout(() => scheduleFitBySid(sid), 120);
+    }
+
+    // Copy on selection (like Putty): use xterm selection change for reliable detection
+    try {
+        term.onSelectionChange(() => {
+            try {
+                const sel = term.getSelection();
+                if (sel && sel.length > 0) copyText(sel);
+            } catch (_) { }
+        });
+    } catch (_) {
+        // fallback to DOM selection
+        termEl.addEventListener('mouseup', () => {
+            setTimeout(() => {
+                let sel = '';
+                try { sel = term.getSelection && term.getSelection() || (document.getSelection ? document.getSelection().toString() : ''); } catch (_) { sel = ''; }
+                if (sel && sel.length > 0) copyText(sel);
+            }, 50);
+        });
+    }
+
+    // Double-click: copy selected word
+    termEl.addEventListener('dblclick', () => {
+        setTimeout(() => {
+            try { const sel = term.getSelection(); if (sel && sel.length > 0) copyText(sel); } catch (_) { }
+        }, 20);
     });
+
+    // Right-click: attempt client clipboard read first (allowed on user gesture). If it fails, ask host to paste.
+    termEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        // Try navigator.clipboard.readText() first (contextmenu is a user gesture so should be permitted)
+        const send = (txt) => { if (txt && txt.length) post({ type: 'input', id: sid, data: txt }); };
+        if (navigator.clipboard && navigator.clipboard.readText) {
+            navigator.clipboard.readText().then(t => {
+                if (t && t.length) {
+                    try { console.log('[ui] paste from navigator.clipboard ->', sid, 'len=', t.length); } catch(_){}
+                    send(t);
+                } else {
+                    try { console.log('[ui] navigator.clipboard empty, fallback to host requestPaste ->', sid); } catch(_){}
+                    post({ type: 'requestPaste', id: sid });
+                }
+            }).catch(err => {
+                try { console.log('[ui] navigator.clipboard.readText failed, requestPaste ->', sid, err && err.message); } catch(_){}
+                post({ type: 'requestPaste', id: sid });
+            });
+        } else {
+            try { console.log('[ui] no navigator.clipboard, requestPaste ->', sid); } catch(_){}
+            post({ type: 'requestPaste', id: sid });
+        }
+    });
+
+    function tryPasteFallback(send) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            document.execCommand('paste');
+            const v = ta.value || '';
+            document.body.removeChild(ta);
+            send(v);
+        } catch (_) { }
+    }
 
     return { sid, paneEl };
 }
@@ -413,7 +554,7 @@ function setPaneFont(sid, px) {
     try { s.term.options.fontSize = px; } catch (_) { }
     try { if (s.term.setOption) s.term.setOption('fontSize', px); } catch (_) { }
     // refir: mudar a fonte muda quantas colunas/linhas cabem 
-    try { s.fit.fit(); post({ type: 'resize', id: sid, cols: s.term.cols, rows: s.term.rows }); } catch (_) { }
+    scheduleFit(s);
     if (focusedPane === sid) syncAppearance();
     // vira a preferncia da janela (reabre novas sessoes com esse tamanho)
     prefs.fontSize = px;
@@ -438,27 +579,27 @@ function toggleAppearance() {
     if (willOpen) { buildThemeGrid(); syncAppearance(); }
 }
 
-// function buildThemeGrid() {
-//     const grid = document.getElementById('ap-themes');
-//     if (grid.childElementCount) return;
-//     Object.entries(THEMES).forEach([k, v]) => {
-//         const card = document.createElement('div');
-//         card.className = 'ap-theme';
-//         card.dataset.theme = k;
-//         card.title = v.label;
-//         card.onclick = () => { if (focusedPane) setPaneTheme(focusedPane, k); }
-//         const sw = v.ansi || [v.bg, v.fg, v.cursor, v.sel];
-//         card.innerHTML =
-//             '<div class="ap-sw" style="backgroud:' + v.bg + '">' +
-//                 '<span style="background:"' + (sw[1] || v.fg) + '"></span>' +
-//                 '<span style="background:"' + (sw[2] || v.cursor) + '"></span>' +
-//                 '<span style="background:"' + (sw[4] || v.cursor) + '"></span>' +
-//                 '<span style="background:"' + (sw[6] || v.fg) + '"></span>' +
-//             '</div>' +
-//             '<div class="ap-theme">' + v.label + '</div>';
-//         grid.appendChild(card);
-//     });
-// }
+function buildThemeGrid() {
+    const grid = document.getElementById('ap-themes');
+    if (grid.childElementCount) return;
+    themeEntries().forEach(([k, v]) => {
+        const card = document.createElement('div');
+        card.className = 'ap-theme';
+        card.dataset.theme = k;
+        card.title = v.label;
+        card.onclick = () => { if (focusedPane) setPaneTheme(focusedPane, k); }
+        const sw = v.ansi || [v.bg, v.fg, v.cursor, v.sel];
+        card.innerHTML =
+            '<div class="ap-sw" style="background:' + v.bg + '">' +
+                '<span style="background:' + (sw[1] || v.fg) + '"></span>' +
+                '<span style="background:' + (sw[2] || v.cursor) + '"></span>' +
+                '<span style="background:' + (sw[4] || v.cursor) + '"></span>' +
+                '<span style="background:' + (sw[6] || v.fg) + '"></span>' +
+            '</div>' +
+            '<div class="ap-tname">' + v.label + '</div>';
+         grid.appendChild(card);
+     });
+}
 
 function syncAppearance() {
     const ap = document.getElementById('appearance');
@@ -467,7 +608,7 @@ function syncAppearance() {
     const note = document.getElementById('ap-note');
     if (!s) {
         note.textContent = 'Nenhuma sessao em foco';
-        document.querySelectorAll('.ap-theme-sel').forEach(c => c.classList.remove('sel'));
+        document.querySelectorAll('.ap-theme.sel').forEach(c => c.classList.remove('sel'));
         return;
     }
     note.textContent = 'Aplica a: ' + s.spec.label;
@@ -536,7 +677,7 @@ function focusPane(sid) {
     s.paneEl.classList.add('focused');
     updateStatus(s);
     syncAppearance();
-    requestAnimationFrame(() => { try { s.fit.fit(); } catch (_) { } s.term.focus(); });
+    requestAnimationFrame(() => { scheduleFit(s); try { s.term.focus(); } catch(_){} });
 }
 
 function updateStatus(s) {
@@ -590,15 +731,22 @@ function attachSplitterDrag(splitter, dir) {
         const nextSize = horiz ? next.offsetWidth : next.offsetHeight;
         const total = prevSize + nextSize;
 
+        let _movePending = false;
         const onMove = (ev) => {
-            const pos = horiz ? ev.clientX : ev.clientY;
-            let d = pos - startPos;
-            let np = prevSize + d, nn = nextSize - d;
-            const min = 80;
-            if (np < min) { np = min; nn = total - min; }
-            if (nn < min) { nn = min; np = total - min; }
-            prev.style.flex = np + ' 1 0';
-            next.style.flex = nn + ' 1 0';
+            // throttle splitter moves to animation frames to avoid layout thrashing
+            if (_movePending) return;
+            _movePending = true;
+            requestAnimationFrame(() => {
+                _movePending = false;
+                const pos = horiz ? ev.clientX : ev.clientY;
+                let d = pos - startPos;
+                let np = prevSize + d, nn = nextSize - d;
+                const min = 80;
+                if (np < min) { np = min; nn = total - min; }
+                if (nn < min) { nn = min; np = total - min; }
+                prev.style.flex = np + ' 1 0';
+                next.style.flex = nn + ' 1 0';
+            });
         };
         const onUp = () => {
             document.removeEventListener('mousemove', onMove);
@@ -703,7 +851,7 @@ if (bridge) {
             const s = sessions[m.id];
             if (s) {
                 const cor = m.code === 0 ? '33' : '31';     // 0 = amarelo (saiu normal); != 0 = vermelho
-                s.term.write('\r\nx1b[' + cor + 'm[sessao encerrada - codigo ' + m.code + ']\x1b[0m\r\n');
+                s.term.write('\r\n\x1b[' + cor + 'm[sessao encerrada - codigo ' + m.code + ']\x1b[0m\r\n');
                 s.alive = false;
                 refreshTabStatus(s.tabId);
             }
@@ -719,12 +867,22 @@ if (bridge) {
         } else if (m.type === 'prefs') {
             if (m.theme && THEMES[m.theme]) prefs.theme = m.theme;
             if (m.fontSize) prefs.fontSize = m.fontSize;
+        } else if (m.type === 'paste') {
+            try { console.log('[ui] paste received id=', m.id, 'len=', (m.data||'').length); } catch(_){}
+            const s = sessions[m.id];
+            if (!s) return;
+            if (m.data) {
+                try { console.log('[ui] forwarding paste to backend as input'); } catch(_){}
+                post({ type: 'input', id: m.id, data: m.data });
+            }
         } else if (m.type === 'keyPicked') {
             document.getElementById('f-key').value = m.path;
         } else if (m.type === 'connSaved') {
             closeConnForm();
         } else if (m.type === 'error') {
             console.error('backend:', m.message);
+            const s = focusedPane && session[focusedPane];
+            if (s) s.term.write('\r\n\x1b[31m[error] ' + m.message + '\x1b[0m\r\n');
         }
     });
 }
@@ -837,7 +995,7 @@ const SB_MAX = 480;
 function refitVisible() {
     Object.values(sessions).forEach(s => {
         if (s.paneEl.offsetParent !== null) {
-            try { s.fit.fit(); post({ type: 'resize', id: s.sid, cols: s.term.cols, rows: s.term.rows }); } catch (_) { }
+            scheduleFit(s);
         }
     });
 }

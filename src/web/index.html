@@ -4,7 +4,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SSH Manager - Git Bash</title>
+    <title>RTermius</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="vendor/xterm.css">
     <link rel="stylesheet" href="styles.css">
 </head>
@@ -33,7 +34,7 @@
 
         <div class="sb-resizer" id="sb-resizer" title="Ärraste para redimensionar"></div>
 
-        <div class="Main">
+        <div class="main">
             <div class="tabs" id="tabs">
                 <div class="newtab" id="newtab" title="Nova sessao" onclick="openGitBash()">+</div>
                 <button class="tabs-appearance" title="Aparencia (tema e fonte)" onclick="toggleAppearance()">&#127912;</button>
@@ -76,11 +77,12 @@
 
     <div class="overlay" id="overlay" onclick="if(event.target==this)closeConnForm()">
         <div class="modal">
-            <div class="modal-hd">
+            <div class="modal-bd">
                 <span id="modal-title">Nova conexao SSH</span>
                 <span class="modal-x" onclick="closeConnForm()">&#10005;</span>
             </div>
             <div class="modal-hd">
+                <form id="conn-form" onsubmit="return false;">
                 <input type="hidden" id="f-id">
                 <label>
                     Nome
@@ -140,7 +142,7 @@
                     <div class="hint">Caminho do arquivo de chave privada</div>
                 </div>
 
-
+                </form>
             </div>
 
             <div class="modal-ft">
@@ -159,7 +161,7 @@
                 <span id="snip-modal-title">Nova snippet</span>
                 <span class="modal-x" onclick="closeSnipForm()">&#10005;</span>
             </div>
-            <div class="modal-hd">
+            <div class="modal-bd">
                 <input type="hidden" id="sf-id">
                 <label>
                     Nome
@@ -167,7 +169,7 @@
                 </label>
                 <label>
                     Comandos
-                    <textarea if="sf-cmds" rows="8" spellcheck="false"
+                    <textarea id="sf-cmds" rows="8" spellcheck="false"
                               placeholder="Um comando por linha. Ex:;&#10;cd /var/log&#10;tail -n 100 -f app.log"></textarea>
                 </label>
                 <div class="hint">Cada linha enviar para o terminal</div>
