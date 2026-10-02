@@ -16,23 +16,23 @@
         <div class="sidebar">
             <div class="sb-head">
                 <span class="sb-title">Conexoes</span>
-                <button class="sb-collapse" title="Recolher barra lateral" onclick="toggleSidebar()">&#9776</button>
+                <button class="sb-collapse" title="Collapse" onclick="toggleSidebar()">&#9776</button>
             </div>
-            <div class="search"><input placeholder="Buscar conexao..." oninput="filterHosts(this.value)"></div>
+            <div class="search"><input id="search-input" placeholder="Search Connections..."></div>
             <div id="hostlist">
                 <div class="grouphdr">Local</div>
-                <div class="host local" data-name="git-bash" onclick="openGitBash()" title="Git Bash - shell local">
+                <div class="host local" data-name="git-bash" onclick="openGitBash()" title="Git Bash - local shell">
                     <div class="ico">$</div>
-                    <div class="meta"><div class="name">Git Bash</div><div class="sub">shell local &middot; ConPTY</div></div>
+                    <div class="meta"><div class="name">Git Bash</div><div class="sub">local shell &middot; ConPTY</div></div>
                     <div class="go">&#8629</div>
                 </div>
                 <div class="grouphdr" id="ssh-group-hdr" style="display:none">SSH</div>
                 <div id="ssh-list"></div>
             </div>
-            <div class="foot"><button class="btn" onclick="openConnForm()" title="Nova Conexao SSH"><span class="btn-icon">+</span><span class="btn-label">Nova Conexao SSH</span></button></div>
+            <div class="foot"><button class="btn" onclick="openConnForm()" title="New Connection"><span class="btn-icon">+</span><span class="btn-label">New SSH Connection</span></button></div>
         </div>
 
-        <div class="sb-resizer" id="sb-resizer" title="Ärraste para redimensionar"></div>
+        <div class="sb-resizer" id="sb-resizer" title="Drag to resize"></div>
 
         <div class="main">
             <div class="tabs" id="tabs">
@@ -75,13 +75,13 @@
         </div>
     </div>
 
-    <div class="overlay" id="overlay" onclick="if(event.target==this)closeConnForm()">
+    <div class="overlay" id="overlay">
         <div class="modal">
-            <div class="modal-bd">
-                <span id="modal-title">Nova conexao SSH</span>
+            <div class="modal-hd">
+                <span id="modal-title">New SSH Connection</span>
                 <span class="modal-x" onclick="closeConnForm()">&#10005;</span>
             </div>
-            <div class="modal-hd">
+            <div class="modal-bd">
                 <form id="conn-form" onsubmit="return false;">
                 <input type="hidden" id="f-id">
                 <label>
@@ -155,7 +155,7 @@
     </div>
 
 
-    <div class="overlay" id="snip-overlay" onclick="if(event.target===this)closeSnipForm()">
+    <div class="overlay" id="snip-overlay">
         <div class="modal">
             <div class="modal-hd">
                 <span id="snip-modal-title">Nova snippet</span>

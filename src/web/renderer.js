@@ -23,7 +23,6 @@ function scheduleFitBySid(sid) {
     // If session not created yet, try once on next tick.
     setTimeout(() => { const s2 = sessions[sid]; if (s2) scheduleFit(s2); }, 0);
 }
-
 function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(text).catch(() => execCopy(text));
@@ -31,7 +30,6 @@ function copyText(text) {
         execCopy(text);
     }
 }
-
 function execCopy(text) {
     const ta = document.createElement('textarea');
     ta.value = text;
@@ -42,7 +40,6 @@ function execCopy(text) {
     try { document.execCommand('copy'); } catch (_) { }
     document.body.removeChild(ta);
 }
-
 function pasteInto(sid) {
     const send = (txt) => { if (txt) sendInputChunked(sid, txt); };
     if (navigator.clipboard && navigator.clipboard.readText) {
@@ -82,7 +79,6 @@ function cdTo(sid, path) {
     const s = sessions[sid];
     if (s) s.term.focus();
 }
-
 function renderFolderMenu(sid) {
     const s = sessions[sid];
     if (!s) return;
@@ -95,11 +91,11 @@ function renderFolderMenu(sid) {
         folders.forEach(p => {
             html += '<div class="fm-item" data-path="' + encodeURIComponent(p) + '">' +
                 '<span class="fm-path"></span>' +
-                '<span class="fm-del" title="Remover">&#10005;</span>' +
+                '<span class="fm-del" title="Remove">&#10005;</span>' +
                 '</div>';
         });
     }
-    html += '<div class="fm-add"><button class="fm-addbtn">+ Adicionar pasta...</button></div>';
+    html += '<div class="fm-add"><button class="fm-addbtn">+ Add Folder...</button></div>';
     menu.innerHTML = html;
 
     menu.querySelectorAll('.fm-item').forEach(it => {
@@ -109,7 +105,7 @@ function renderFolderMenu(sid) {
         it.querySelector('.fm-del').onclick = (e) => { e.stopPropagation(); post({ type: 'removeFolder', path: p }); };
     });
     menu.querySelector('.fm-addbtn').onclick = () => {
-        const p = prompt('Caminho da pasta. Ex: ~/wspace', '');
+        const p = prompt('Folder Path. Ex: ~/wspace', '');
         if (p && p.trim()) post({ type: 'addFolder', path: p.trim() });
     };
 }
@@ -182,7 +178,7 @@ function renderSnipMenu(sid) {
 
 function editSnippet(sn) {
     closeSnipMenu();
-    document.getElementById('snip-modal-title').textContent = sn ? 'Editar snippet' : 'Novo snippet';
+    document.getElementById('snip-modal-title').textContent = sn ? 'Edit snippet' : 'New snippet';
     document.getElementById('sf-id').value = sn ? sn.Id : '';
     document.getElementById('sf-name').value = sn ? (sn.Name || '') : '';
     document.getElementById('sf-cmds').value = sn ? (sn.Commands || '') : '';
@@ -195,8 +191,8 @@ function closeSnipForm() { document.getElementById('snip-overlay').classList.rem
 function saveSnippet() {
     const name = document.getElementById('sf-name').value.trim();
     const commands = document.getElementById('sf-cmds').value;
-    if (!name) { alert('Informe um nome para o snippet'); return; }
-    if (!commands.trim()) { alert('Informe ao menos um comando'); return; }
+    if (!name) { alert('Snippet Name is required'); return; }
+    if (!commands.trim()) { alert('Please enter at least one command'); return; }
     post({ type: 'saveSnippet', snippet: {
             id: document.getElementById('sf-id').value || undefined, name, commands
         }
@@ -206,7 +202,7 @@ function saveSnippet() {
 function deleteSnippetFromForm() {
     const id = document.getElementById('sf-id').value;
     if (!id) return;
-    if (!confirm('Excluir este snippet?')) return;
+    if (!confirm('Delete this snippet?')) return;
     post({ type: 'deleteSnippet', snippetId: id });
     closeSnipForm();
 }
@@ -348,8 +344,8 @@ function showVendorError() {
     document.getElementById('terminals').insertAdjacentHTML('beforeend',
         '<div class="term active" style="padding:24px;color:#ff9d9d;font-family:var(--mono);' +
         'font-size:13px;line-height:1.6;white-space:pre-wrap">' +
-        'xterm.js nao encontrado em web/vendor/\n\nFaltam: vendor/xterm.js, vendor/xterm.css, ' +
-        'vendor/addon-fit.js\n\nVeja web/vendor/README.md</div>');
+        'xterm.js not found in web/vendor/\n\nMissing: vendor/xterm.js, vendor/xterm.css, ' +
+        'vendor/addon-fit.js\n\nSee web/vendor/README.md</div>');
 }
 
 function makePane(spec) {
@@ -365,14 +361,14 @@ function makePane(spec) {
         '<span class="pane-title"></span>' +
         '<span class="pane-actions">' +
         '<div class="folder-dd">' +
-        '<button class="pb" data-act="folders" title="Pastas favoritas">&#128193;</button>' +
+        '<button class="pb" data-act="folders" title="Favorite Folders">&#128193;</button>' +
         '<div class="folder-menu"></div>' +
         '</div>' +
         '<div class="snip-dd">' +
-        '<button class="pb" data-act="snippets" title="Snippets (comandos)">&#9889;</button>' +
+        '<button class="pb" data-act="snippets" title="Snippets (Commands)">&#9889;</button>' +
         '<div class="snip-menu"></div>' +
         '</div>' +
-        '<select class="pane-theme" title="Tema"></select>' +
+        '<select class="pane-theme" title="Theme"></select>' +
         '<button class="pb" data-act="sh" title="Dividir lado a lado (Ctrl+Shift+D">&#9707;</button>' +
         '<button class="pb" data-act="sv" title="Dividir Empilhado (Ctrl+Shift+E">&#9707;</button>' +
         '<button class="pb close" data-act="x" title="Fechar Painel">&#10005;</button>' +
@@ -483,43 +479,6 @@ function makePane(spec) {
         }, 20);
     });
 
-    // Right-click: attempt client clipboard read first (allowed on user gesture). If it fails, ask host to paste.
-    termEl.addEventListener('contextmenu', (e) => {
-        e.preventDefault();
-        // Try navigator.clipboard.readText() first (contextmenu is a user gesture so should be permitted)
-        const send = (txt) => { if (txt && txt.length) post({ type: 'input', id: sid, data: txt }); };
-        if (navigator.clipboard && navigator.clipboard.readText) {
-            navigator.clipboard.readText().then(t => {
-                if (t && t.length) {
-                    try { console.log('[ui] paste from navigator.clipboard ->', sid, 'len=', t.length); } catch(_){}
-                    send(t);
-                } else {
-                    try { console.log('[ui] navigator.clipboard empty, fallback to host requestPaste ->', sid); } catch(_){}
-                    post({ type: 'requestPaste', id: sid });
-                }
-            }).catch(err => {
-                try { console.log('[ui] navigator.clipboard.readText failed, requestPaste ->', sid, err && err.message); } catch(_){}
-                post({ type: 'requestPaste', id: sid });
-            });
-        } else {
-            try { console.log('[ui] no navigator.clipboard, requestPaste ->', sid); } catch(_){}
-            post({ type: 'requestPaste', id: sid });
-        }
-    });
-
-    function tryPasteFallback(send) {
-        try {
-            const ta = document.createElement('textarea');
-            ta.style.position = 'fixed'; ta.style.opacity = '0';
-            document.body.appendChild(ta);
-            ta.focus();
-            document.execCommand('paste');
-            const v = ta.value || '';
-            document.body.removeChild(ta);
-            send(v);
-        } catch (_) { }
-    }
-
     return { sid, paneEl };
 }
 
@@ -625,12 +584,24 @@ function newTab(spec) {
     const tabEl = document.createElement('div');
     tabEl.className = 'tab on';
     tabEl.id = 'tab-' + tabId;
+    tabEl.draggable = true;
     tabEl.onclick = (e) => { if (!e.target.classList.contains('x')) activateTab(tabId); };
     tabEl.innerHTML =
         '<span class="st"></span><span class="dot" title="Nova saida"></span>' +
+        '<span class="rec" title="Recording on File"></span>' +
         '<span class="label"></span><span class="x" title="Fechar aba">&#10005;</span>';
     tabEl.querySelector('.label').textContent = spec.label;
+    const labelEl = tabEl.querySelector('.label');
+    labelEl.textContent = spec.label;
+    labelEl.title = 'Double-Click to Rename';
+    labelEl.ondblclick = (e) => { e.stopPropagation(); beginRenameTab(tabId); };
     tabEl.querySelector('.x').onclick = (e) => { e.stopPropagation(); closeTab(tabId); };
+    tabEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showTabMenu(tabId, e.clientX, e.clientY);
+    });
+    setupTabDrag(tabEl, tabId);
     document.getElementById('tabs').insertBefore(tabEl, document.getElementById('newtab'));
 
     const container = document.createElement('div');
@@ -648,6 +619,95 @@ function newTab(spec) {
     focusPane(sid);
 }
 
+let dragTabId = null;
+function setupTabDrag(tabEl, tabId) {
+    tabEl.addEventListener('dragstart', (e) => {
+        if (tabEl.querySelector('.label-edit')) { e.preventDefault(); return; }
+        dragTabId = tabId;
+        tabEl.classList.add('dragging');
+        try {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', tabId);
+            } catch (_) { }
+    });
+
+    tabEl.addEventListener('dragend', () => {
+        dragTabId = null;
+        tabEl.classList.remove('dragging');
+        document.querySelectorAll('.tab.drop-before, .tab.drop-after')
+            .forEach(t => t.classList.remove('drop-before', 'drop-after'));
+    });
+
+    tabEl.addEventListener('dragover', (e) => {
+        if (dragTabId == null || dragTabId === tabId) return;
+        e.preventDefault();
+        try { e.dataTransfer.dropEffect = 'move'; } catch (_) { }
+        const r = tabEl.getBoundingClientRect();
+        const after = e.clientX > r.left + r.width / 2;
+        tabEl.classList.toggle('drop-after', after);
+        tabEl.classList.toggle('drop-before', !after);
+    });
+
+    tabEl.addEventListener('dragleave', () => {
+        tabEl.classList.remove('drop-before', 'drop-after');
+    });
+
+    tabEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        if (dragTabId == null || dragTabId === tabId) return;
+        const src = tabs[dragTabId] && tabs[dragTabId].tabEl;
+        if (!src) return;
+        const r = tabEl.getBoundingClientRect();
+        const after = e.clientX > r.left + r.width / 2;
+        const bar = document.getElementById('tabs');
+        let ref = after ? tabEl.nextSibling : tabEl;
+        const newtab = document.getElementById('newtab');
+        if (ref && (ref === newtab || !ref.classList || !ref.classList.contains('tab'))) ref = newtab;
+        bar.insertBefore(src, ref);
+        tabEl.classList.remove('drop-before', 'drop-after');
+    });
+}
+
+function beginRenameTab(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    const labelEl = t.tabEl.querySelector('.label');
+    if (!labelEl || t.tabEl.querySelector('.label-edit')) return;
+
+    const current = labelEl.textContent;
+    const input = document.createElement('input');
+    input.className = 'label-edit';
+    input.value = current;
+    input.spellcheck = false;
+    input.onclick = (e) => e.stopPropagation();
+    input.ondblclick = (e) => e.stopPropagation();
+
+    labelEl.style.display = 'none';
+    labelEl.after(input);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finish = (save) => {
+        if (done) return;
+        const val = input.value.trim();
+        if (save && val) {
+            labelEl.textContent = val;
+            const first = t.container.querySelector('.pane');
+            const s = first && sessions[first.dataset.sid];
+            if (s) s.spec.label = val;
+        }
+        input.remove();
+        labelEl.style.display = '';
+    };
+
+    input.onkeydown = (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+        else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+        e.stopPropagation();
+    };
+    input.onblur = () => finish(true);
+}
 function activateTab(tabId) {
     activeTab = tabId;
     Object.values(tabs).forEach(t => {
@@ -677,11 +737,15 @@ function focusPane(sid) {
     s.paneEl.classList.add('focused');
     updateStatus(s);
     syncAppearance();
-    requestAnimationFrame(() => { scheduleFit(s); try { s.term.focus(); } catch(_){} });
+    requestAnimationFrame(() => {
+        scheduleFit(s);
+        if (document.querySelector('.label-edit')) return;
+        try { s.term.focus(); } catch (_) { }
+    });
 }
 
 function updateStatus(s) {
-    document.getElementById('sb-conn').innerHTML = '&#9679; <span class="k"></span>';
+    dsocument.getElementById('sb-conn').innerHTML = '&#9679; <span class="k"></span>';
     document.querySelector('#sb-conn .k').textContent = s.spec.label;
     document.getElementById('sb-enc').textContent = s.spec.status || '';
 }
@@ -770,6 +834,7 @@ function closeSession(sid) {
     const paneEl = s.paneEl;
     const parent = paneEl.parentNode;
     delete sessions[sid];
+    if(logging[sid]) { delete logging[sid]; updateTabRecIndicator(tabId); }
 
     if (parent && parent.classList.contains('split')) {
         const splitter = paneEl.previousElementSibling && paneEl.previousElementSibling.classList.contains('splitter')
@@ -798,6 +863,7 @@ function closeTab(tabId,skipSessions) {
         t.container.querySelectorAll('.pane').forEach(p => {
             const sid = p.dataset.sid, s = sessions[sid];
             if (s) { post({ type: 'close', id: sid }); try { s.ro.disconnect(); s.term.dispose(); } catch (_) { } delete sessions[sid]; }
+            if (logging[sid]) { delete logging[sid]; }
         });
     }
     t.tabEl.remove();
@@ -816,20 +882,114 @@ function closeTab(tabId,skipSessions) {
     }
 }
 
+const logging = {};
+
+function tabLoggingSids(tabId) {
+    const t = tabs[tabId];
+    if (!t) return [];
+    return [...t.container.querySelectorAll('.pane')].map(p => p.dataset.sid);
+}
+function isTabLogging(tabId) {
+    return tabLoggingSids(tabId).some(sid => logging[sid]);
+}
+function updateTabRecIndicator(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    const on = isTabLogging(tabId);
+    t.tabEl.classList.toggle('logging', on);
+    const rec = t.tabEl.querySelector('.rec');
+    if (rec) {
+        const paths = tabLoggingSids(tabId).map(sid => logging[sid]).filter(Boolean);
+        rec.title = paths.length ? ('Recording to:\n' + paths.join('\n')) : '';
+    }
+}
+function startTabLogging(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    const label = t.tabEl.querySelector('.label').textContent || tabId;
+    tabLoggingSids(tabId).forEach(sid => {
+        if (logging[sid]) return;
+        post({ type: 'startLog', id: sid, label });
+    });
+}
+function stopTabLogging(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    tabLoggingSids(tabId).forEach(sid => {
+        // ask backend to stop logging for each session in the tab
+        post({ type: 'stopLog', id: sid });
+    });
+}
+
+let tabMenuEl = null;
+function closeTabMenu() {
+    if (tabMenuEl) { tabMenuEl.remove(); tabMenuEl = null; }
+    document.removeEventListener('mousedown', onDocMouseDownForTabMenu, true);
+    document.removeEventListener('keydown', onDocKeyDownForTabMenu, true);
+}
+function onDocMouseDownForTabMenu(e) {
+    if (tabMenuEl && !tabMenuEl.contains(e.target)) {
+        closeTabMenu();
+    }
+}
+function onDocKeyDownForTabMenu(e) {
+    if(e.key === 'Escape') closeTabMenu();
+}
+function showTabMenu(tabId, x, y) {
+    closeTabMenu();
+    const t = tabs[tabId];
+    if (!t) return;
+    const menu = document.createElement('div');
+    menu.className = 'tab-menu';
+    const isLog = isTabLogging(tabId);
+    const items = [
+        { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
+        isLog
+            ? { label: 'Stop Recording', action: () => stopTabLogging(tabId) }
+            : { label: 'Start Recording', action: () => startTabLogging(tabId) },
+        { sep: true },
+        { label: 'Open Log Directory', action: () => post({ type: 'openLogDir' }) },
+        { label: 'Setup Log Directory', action: () => post({ type: 'pickLogDir' }) },
+        { sep: true },
+        { label: 'Close Tab', action: () => closeTab(tabId) },
+    ];
+    items.forEach(it => {
+        if (it.sep) {
+            const sep = document.createElement('div');
+            sep.className = 'tab-menu-sep';
+            menu.appendChild(sep);
+            return;
+        }
+        const el = document.createElement('div');
+        el.className = 'tab-menu-item';
+        el.textContent = it.label;
+        el.onclick = () => { closeTabMenu(); it.action(); };
+        menu.appendChild(el);
+    });
+    document.body.appendChild(menu);
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    const vx = Math.min(x, window.innerWidth - w - 4);
+    const vy = Math.min(y, window.innerHeight - h - 4);
+    menu.style.left = vx + 'px';
+    menu.style.top = vy + 'px';
+    tabMenuEl = menu;
+    setTimeout(() => {
+        document.addEventListener('mousedown', onDocMouseDownForTabMenu, true);
+        document.addEventListener('keydown', onDocKeyDownForTabMenu, true);
+    }, 0);
+}
 function openGitBash() {
     const host = document.querySelector('.host.local');
     if (host) host.classList.add('connected');
     newTab({ startMsg: { type: 'start' }, label: 'Git Bash ' + (tabSeq + 1),
-             status: 'ConPTY - bash.exe', theme: prefs.theme, fontSize: prefs.fontSize });
+             status: 'bash - ConPTY', theme: prefs.theme, fontSize: prefs.fontSize });
 }
-
 function openSsh(connId, name, theme) {
     // Tema salvo
     newTab({
         startMsg: { type: 'startSsh', connId }, label: name || 'SSH',
-        status: 'ssh.exe - ConPTY', theme: theme || prefs.theme, fontSize: prefs.fontSize, connId });
+        status: 'ssh - ConPTY', theme: theme || prefs.theme, fontSize: prefs.fontSize, connId });
 }
-
 function filterHosts(q) {
     q = q.toLowerCase();
     document.querySelectorAll('.host').forEach(h => {
@@ -853,6 +1013,7 @@ if (bridge) {
                 const cor = m.code === 0 ? '33' : '31';     // 0 = amarelo (saiu normal); != 0 = vermelho
                 s.term.write('\r\n\x1b[' + cor + 'm[sessao encerrada - codigo ' + m.code + ']\x1b[0m\r\n');
                 s.alive = false;
+                if (logging[m.id]) { delete logging[m.id]; updateTabRecIndicator(s.tabId); }
                 refreshTabStatus(s.tabId);
             }
         } else if (m.type === 'conns') {
@@ -868,11 +1029,11 @@ if (bridge) {
             if (m.theme && THEMES[m.theme]) prefs.theme = m.theme;
             if (m.fontSize) prefs.fontSize = m.fontSize;
         } else if (m.type === 'paste') {
-            try { console.log('[ui] paste received id=', m.id, 'len=', (m.data||'').length); } catch(_){}
+            try { console.log('[ui] paste received id=', m.id, 'len=', (m.data || '').length); } catch (_) { }
             const s = sessions[m.id];
             if (!s) return;
             if (m.data) {
-                try { console.log('[ui] forwarding paste to backend as input'); } catch(_){}
+                try { console.log('[ui] forwarding paste to backend as input'); } catch (_) { }
                 post({ type: 'input', id: m.id, data: m.data });
             }
         } else if (m.type === 'keyPicked') {
@@ -881,14 +1042,21 @@ if (bridge) {
             closeConnForm();
         } else if (m.type === 'error') {
             console.error('backend:', m.message);
-            const s = focusedPane && session[focusedPane];
+            const s = focusedPane && sessions[focusedPane];
             if (s) s.term.write('\r\n\x1b[31m[error] ' + m.message + '\x1b[0m\r\n');
+        } else if (m.type === 'logStatus') {
+            const sid = m.id;
+            const s = sessions[sid];
+            if (m.active) logging[sid] = m.path || true;
+            else delete logging[sid];
+            if (s) updateTabRecIndicator(s.tabId);
+        } else if (m.type === 'logDirPicked') {
+            try { console.log('[ui] logDirPicked:', m.path); } catch (_) { }
         }
     });
 }
 
 let conns = [];
-
 function renderConns(items) {
     conns = items;
     const list = document.getElementById('ssh-list');
@@ -913,7 +1081,7 @@ function renderConns(items) {
 
 function openConnForm(connId) {
     const c = connId ? conns.find(x => x.Id === connId) : null;
-    document.getElementById('modal-title').textContent = c ? 'Editar conexao SSH' : 'Nova conexao SSH';
+    document.getElementById('modal-title').textContent = c ? 'Edit SSH Connection' : 'New SSH Connection';
     document.getElementById('f-id').value = c ? c.Id : '';
     document.getElementById('f-name').value = c ? (c.Name || '') : '';
     document.getElementById('f-host').value = c ? (c.Host || '') : '';
@@ -923,7 +1091,7 @@ function openConnForm(connId) {
     document.getElementById('f-theme').value = c ? (c.Theme || 'default') : 'default';
     document.getElementById('f-password').value = '';
     document.getElementById('f-password').placeholder =
-        c && c.hasPassword ? '****** (mantem a salva; digite p/ trocar)' : 'deixe em branco para nao salvar';
+        c && c.hasPassword ? '****** (keep saved;)' : 'keep blank to not save';
     setAuth(c ? (c.AuthMethod || 'password') : 'password');
     document.getElementById('btn-delete').style.display = c ? '' : 'none';
     document.getElementById('overlay').classList.add('show');
@@ -962,7 +1130,7 @@ function saveConn() {
 
     if (!host) { alert('Informe o Host / IP.'); return; }
     if (!user) { alert('Informe o Usuario.'); return; }
-    if (authMethod === 'key' && !keyPath) { alert('Informe o caminho da chave privada.'); return; }
+    if (authMethod === 'key' && !keyPath) { alert('Private Key Path is required.'); return; }
 
     const conn = {
         id: document.getElementById('f-id').value || undefined,
@@ -982,7 +1150,7 @@ function saveConn() {
 function deleteConn() {
     const id = document.getElementById('f-id').value;
     if (!id) return;
-    if (!confirm('Excluir esta conexao ?')) return;
+    if (!confirm('Remove Connection ?')) return;
     post({ type: 'deleteConn', connId: id });
     closeConnForm();
 }
@@ -1084,3 +1252,13 @@ post({ type: 'loadPrefs' });
 post({ type: 'loadConns' });
 post({ type: 'loadFolders' });
 post({ type: 'loadSnippets' });
+
+// Attach DOM handlers that avoid inline event usage (prevents TS checking issues)
+try {
+    const search = document.getElementById('search-input');
+    if (search) search.addEventListener('input', (e) => { try { filterHosts(e.target && e.target.value || ''); } catch(_){} });
+    const overlay = document.getElementById('overlay');
+    if (overlay) overlay.addEventListener('click', (e) => { if (e.target === e.currentTarget) closeConnForm(); });
+    const snipOverlay = document.getElementById('snip-overlay');
+    if (snipOverlay) snipOverlay.addEventListener('click', (e) => { if (e.target === e.currentTarget) closeSnipForm(); });
+} catch(_) {}

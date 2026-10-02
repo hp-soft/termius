@@ -305,6 +305,40 @@ html, body {
 	text-overflow: ellipsis
 }
 
+.tab .label-edit {
+	width: 96px;
+	padding: 1px 4px;
+	border: 1px solid var(--accent);
+	border-radius: 4px;
+	background: var(--bg);
+	color: var(--txt);
+	font: inherit;
+	outline: none
+}
+
+.tab.dragging {
+	opacity: .5;
+}
+
+.tab.drop-before::before,
+.tab.drop-after::after {
+	  content: "";
+	  position: absolute;
+	  top: 4px;
+	  bottom: 4px;
+	  width: 2px;
+	  background: var(--accent);
+	  border-radius: 2px;
+}
+
+.tab.drop-before {
+	left: -1px;
+}
+
+.tab.drop-after::after {
+	right: -1px;
+}
+
 .tab .dot {
 	width:9px;
 	height:9px;
@@ -320,8 +354,54 @@ html, body {
 	animation: pulse 1.4s infinite
 }
 
+.tab .rec {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #ff3b3b;
+	box-shadow: 0 0 0 3px rgba(255,59,59,.18);
+	display: none;
+	flex-shrink: 0;
+}
+
+.tab.logging .rec {
+	display: block;
+	animation: pulse 1.4s infinite;
+}
+
+.tab-menu {
+	position: fixed;
+	z-index: 9999;
+	min-width: 200px;
+	background: var(--bg, #0b1220);
+	color: var(--txt, #cdd6e4);
+	border: 1px solid rgba(255,255,255,.08);
+	border-radius: 8px;
+	box-shadow: 0 10px 30px rgba(0,0,0,.05);
+	padding: 4px;
+	font-size: 12.5px;
+	user-select: none;
+}
+
+.tab-menu-item {
+    padding: 6px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.tab-menu-item:hover {
+    background: rgba(255,255,255,.06);
+}
+
+.tab-menu-sep {
+    height: 1px;
+	margin: 4px 6px;
+	background: rgba(255,255,255,.08);
+}
+
 @keyframes pulse {
-	0%,100% {
+	0%, 100% {
 		opacity: 1
 	}
 
@@ -403,7 +483,7 @@ html, body {
 	flex: 0 0 6px;
 	background: var(--border);
 	position: relative;
-	z-index: atan2()
+	z-index: 2;
 }
 
 .splitter.sp-h {

@@ -13,6 +13,7 @@
 	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	<LangVersion>latest</LangVersion>
 	<SelfContained>false</SelfContained>
+	<ApplicationManifest>app.manifest</ApplicationManifest>
 	</PropertyGroup>
 
 	<ItemGroup>

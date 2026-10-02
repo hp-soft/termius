@@ -7,6 +7,8 @@ public sealed class Prefs
 {
     public string Theme { get; set; } = "default";
     public double FontSize { get; set; } = 13.5;
+
+    public string LogDir { get; set; } = "";
 }
 
 public sealed class PrefsStore

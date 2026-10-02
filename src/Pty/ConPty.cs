@@ -25,8 +25,10 @@ public sealed class ConPty : IDisposable
 		
 	// Disparado quando o processo do shell termina
 	public event Action<int>? Exited;
-		
-	public void Start(string command, string cwd, short cols, short rows)
+
+	public event Action<byte[]>? RawOutput;
+
+    public void Start(string command, string cwd, short cols, short rows)
 	{
 		// Pipes (InputRead/Writer) e (outputRead/Writer)
 		if(!CreatePipe(out _inputRead, out _inputWrite, IntPtr.Zero, 0 ))
@@ -46,7 +48,7 @@ public sealed class ConPty : IDisposable
 		var size = new COORD { X = cols, Y = rows };
 		int hr = CreatePseudoConsole(size, _inputRead!.DangerousGetHandle(),
 							_outputWrite!.DangerousGetHandle(), 0, out _hPC);
-		try { Output?.Invoke($"[log] CreatePseudoConsole hr={hr} hPC=0x{_hPC.ToString("X")}" + "\r\n"); } catch { }
+		//try { Output?.Invoke($"[log] CreatePseudoConsole hr={hr} hPC=0x{_hPC.ToString("X")}" + "\r\n"); } catch { }
 		if(hr != 0)
 			throw new Win32Exception(hr, "CreatePseudoConsole failed");
 				
@@ -56,16 +58,16 @@ public sealed class ConPty : IDisposable
 				
 		var attrSize = IntPtr.Zero;
 		var initOk = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attrSize);
-		try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(query) returned {initOk}, attrSize={attrSize}\r\n"); } catch { }
+		//try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(query) returned {initOk}, attrSize={attrSize}\r\n"); } catch { }
 		siEx.lpAttributeList = Marshal.AllocHGlobal(attrSize);
 		initOk = InitializeProcThreadAttributeList(siEx.lpAttributeList, 1, 0, ref attrSize);
 		if (!initOk)
 		{
 			var err = Marshal.GetLastWin32Error();
-			try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(init) failed, GetLastWin32Error={err}\r\n"); } catch { }
+			//try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(init) failed, GetLastWin32Error={err}\r\n"); } catch { }
 			throw new Win32Exception(err,"InitializeProcThreadAttributeList failed");
 		}
-		try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(init) succeeded, lpAttributeList=0x{siEx.lpAttributeList.ToString("X")}\r\n"); } catch { }
+		//try { Output?.Invoke($"[log] InitializeProcThreadAttributeList(init) succeeded, lpAttributeList=0x{siEx.lpAttributeList.ToString("X")}\r\n"); } catch { }
 				
 		if (!UpdateProcThreadAttribute(siEx.lpAttributeList, 0,
 			(IntPtr)PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, _hPC, (IntPtr)IntPtr.Size,
@@ -76,7 +78,7 @@ public sealed class ConPty : IDisposable
 		var pSec = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>() };
 		var tSec = new SECURITY_ATTRIBUTES { nLength = Marshal.SizeOf<SECURITY_ATTRIBUTES>() };
 		// Log command about to be spawned for diagnostics
-		try { Output?.Invoke($"\r\n[log {DateTime.Now:O}] CreateProcess request: {command} cwd={cwd}\r\n"); } catch { }
+		//try { Output?.Invoke($"\r\n[log {DateTime.Now:O}] CreateProcess request: {command} cwd={cwd}\r\n"); } catch { }
 
 		// Parse command into application and arguments to pass lpApplicationName separately
 		string? exePath = null;
@@ -107,7 +109,7 @@ public sealed class ConPty : IDisposable
 			args = string.Empty;
 		}
 
-		try { Output?.Invoke($"[log] exe={exePath} args={args}\r\n"); } catch { }
+		//try { Output?.Invoke($"[log] exe={exePath} args={args}\r\n"); } catch { }
 
 		var quotedExe = exePath.Contains(' ') ? $"\"{exePath}\"" : exePath;
 		var fullCmd = string.IsNullOrWhiteSpace(args) ? quotedExe : $"{quotedExe} {args}";
@@ -126,7 +128,7 @@ public sealed class ConPty : IDisposable
 		catch (Exception ex)
 		{
 			// log detailed error
-			try { Output?.Invoke($"[error] CreateProcess exception: {ex}\r\n"); } catch { }
+			//try { Output?.Invoke($"[error] CreateProcess exception: {ex}\r\n"); } catch { }
 			Console.WriteLine($"CreateProcess exception: {ex}");
 			throw;
 		}
@@ -167,8 +169,14 @@ public sealed class ConPty : IDisposable
 				int read;
 				while (!_disposed && _reader != null && (read = _reader.Read(buffer,0,buffer.Length)) > 0)
 				{
-						int n = decoder.GetChars(buffer, 0, read, chars, 0);
-						if (n > 0) Output?.Invoke(new string(chars, 0, n));
+					if( RawOutput != null)
+					{
+						var copy = new byte[read];
+						Array.Copy(buffer, 0, copy, 0, read);
+						RawOutput.Invoke(copy);
+					}
+					int n = decoder.GetChars(buffer, 0, read, chars, 0);
+					if (n > 0) Output?.Invoke(new string(chars, 0, n));
 				}
 		}
 		catch (Exception)

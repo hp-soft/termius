@@ -9,6 +9,8 @@ using System.Windows.Interop;
 using Microsoft.Web.WebView2.Core;
 using SshManager.Pty;
 using SshManager.Storage;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SshManager;
 internal static class Log
@@ -41,7 +43,24 @@ public partial class MainWindow : Window
 	private readonly SnippetStore _snippets = new();
 	private readonly PrefsStore _prefs = new();
 
-	public MainWindow()
+	private sealed class SessionLog
+	{
+		public required FileStream Stream;
+		public required string Path;
+		public required Decoder Decoder;
+		public required System.Text.StringBuilder Buffer;
+		public int Cursor;
+	}
+
+	private readonly Dictionary<string, SessionLog> _logs = new();
+	private readonly object _logLock = new();
+
+	// Regex to strip common ANSI CSI sequences and control chars (preserve CR/LF and keep BS '\b' for processing)
+	private static readonly Regex _ansiRegex = new(@"\x1B\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled);
+	// keep backspace (\x08) so we can process it; remove other C0 except CR(0x0D) and LF(0x0A)
+	private static readonly Regex _ctrlRegex = new(@"[\x00-\x07\x0B\x0C\x0E-\x1F\x7F]", RegexOptions.Compiled);
+
+    public MainWindow()
 	{
 		InitializeComponent();
 		_store.Load();
@@ -49,7 +68,14 @@ public partial class MainWindow : Window
 		_snippets.Load();
 		_prefs.Load();
 		Loaded += OnLoaded;
-		Closed += (_, _) => { foreach (var s in _sessions.Values) s.Dispose(); };
+		Closed += (_, _) => { 
+			foreach (var s in _sessions.Values) s.Dispose(); 
+			lock (_logLock) 
+			{ 
+				foreach (var l in _logs.Values) { try { l.Stream.Flush(); l.Stream.Dispose(); } catch { } }
+				_logs.Clear();
+		    }
+        };
 		// Corrige o maximizar de janela borderless (WindowStyle=None): sem isto
 		// o conteudo extrapola a tela e o rodape (nova conexao/status) some
 		SourceInitialized += (_, _) =>
@@ -84,6 +110,8 @@ public partial class MainWindow : Window
 					mmi.ptMaxPosition.Y = work.Top - area.Top;
 					mmi.ptMaxSize.X = work.Right - work.Left;
 					mmi.ptMaxSize.Y = work.Bottom - work.Top;
+					mmi.ptMaxTrackSize.X = work.Right - work.Left;
+					mmi.ptMaxTrackSize.Y = work.Bottom - work.Top;
 					mmi.ptMinTrackSize.X = 640;
 					mmi.ptMinTrackSize.Y = 420;
 					Marshal.StructureToPtr(mmi, lParam, true);
@@ -109,7 +137,7 @@ public partial class MainWindow : Window
 	private void OnMinimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
 	private void OnMaximize(object sender, RoutedEventArgs e)
-		=> WindowState = WindowState == WindowState.Minimized ? WindowState.Normal : WindowState.Maximized;
+		=> WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
 	private void OnClose(object sender, RoutedEventArgs e) => Close();
 
@@ -156,9 +184,7 @@ public partial class MainWindow : Window
 		// Abrir DevTools automaticamente para depuração (remover após diagnosticar)
 		try { Web.CoreWebView2.OpenDevToolsWindow(); } catch { }
 
-
 		Web.CoreWebView2.Settings.AreDevToolsEnabled = true;
-
 
         // Concede automaticamente o acesso ao clipboard para a origem local
         // (necessario para o paste com botao direito via navigator.clipboard)
@@ -203,9 +229,29 @@ public partial class MainWindow : Window
 					}
 				case "close":
 					if (_sessions.Remove(id, out var c)) c.Dispose();
+					CloseLog(id);
 					break;
 
-				case "loadConns": SendConns(); break;
+				case "startLog":
+					var label = root.TryGetProperty("label", out var lEl) ? lEl.GetString() : null;
+					var dir = root.TryGetProperty("dir", out var dEl) ? dEl.GetString() : null;
+                    StartLog(id, label, dir);
+					break;
+
+				case "stopLog": 
+					CloseLog(id);
+					PostToWeb(new { type = "logStatus", id, active = false, path = (string?)null });
+					break;
+
+				case "pickLogDir":
+					PickLogDir();
+					break;
+
+				case "openLogDir":
+					OpenLogDir();
+                    break;
+
+                case "loadConns": SendConns(); break;
 				case "saveConn": SaveConn(root); break;
 				case "deleteConn": _store.Remove(root.GetProperty("connId").GetString() ?? ""); SendConns(); break;
 				case "pickKey": PickKey(); break;
@@ -311,6 +357,7 @@ public partial class MainWindow : Window
 		pty.Exited += code =>
 		{
 			Log.Write($"[{id}] processo encerrado, codigo={code}\n");
+			CloseLog(id);
 			PostToWeb(new { type = "exit", id, code });
 		};
         Log.Write($"[{id}] Spawn: {command} (cwd={cwd} cols={cols} rows={rows})");
@@ -352,7 +399,12 @@ public partial class MainWindow : Window
 
 	private void SendSnippets() => PostToWeb(new { type = "snippets", items = _snippets.Items });
 
-	private void SendPrefs() => PostToWeb(new { type = "prefs", theme = _prefs.Current.Theme, fontSize = _prefs.Current.FontSize });
+	private void SendPrefs() => PostToWeb(new 
+	{	type = "prefs", 
+		theme = _prefs.Current.Theme, 
+		fontSize = _prefs.Current.FontSize, 
+		logDir = ResolveLogDir() 
+	});
 
 	private void SavePrefs(JsonElement root)
 	{
@@ -360,10 +412,223 @@ public partial class MainWindow : Window
 			_prefs.Current.Theme = t.GetString() ?? "default";
 		if (root.TryGetProperty("fontSize", out var f) && f.TryGetDouble(out var fv))
 			_prefs.Current.FontSize = fv;
+		if (root.TryGetProperty("logDir", out var d) && d.ValueKind == JsonValueKind.String)
+            _prefs.Current.LogDir = d.GetString() ?? "";
 		_prefs.Save();
 	}
 
-	private void SaveSnippet(JsonElement root)
+	private string ResolveLogDir()
+    {
+        var dir = _prefs.Current.LogDir;
+        if (!string.IsNullOrWhiteSpace(dir)) return dir;
+        dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "termius-logs");
+        return dir;
+    }
+
+	private void StartLog(string id, string? label, string? dirOverrride)
+	{
+		CloseLog(id);
+		if ( !_sessions.TryGetValue(id, out var pty))
+		{
+			PostToWeb(new { type = "error", message = $"Session not found: {id}" });
+            return;
+        }
+		var dir = string.IsNullOrWhiteSpace(dirOverrride) ? ResolveLogDir() : dirOverrride;
+		try {  Directory.CreateDirectory(dir); } 
+		catch (Exception ex) {
+			PostToWeb( new { type = "error", message = $"Failed to create log directory: {dir}. Error: {ex.Message}" });
+			return;
+        }
+		var tab = string.IsNullOrWhiteSpace(label) ? id : label;
+		var invalid = Path.GetInvalidFileNameChars();
+		foreach( var ch in invalid) tab = tab.Replace(ch, '_');
+		var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+		var path = Path.Combine(dir, $"{tab}_{stamp}.log");
+
+		FileStream fs;
+		try
+		{
+			fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+        }
+        catch (Exception ex)
+        {
+            PostToWeb(new { type = "error", message = $"Failed to create log file: {path}. Error: {ex.Message}" });
+            return;
+        }
+
+		var separator = System.Text.Encoding.UTF8.GetBytes(
+			$"{Environment.NewLine}---- session {DateTime.Now:yyyy-MM-dd HH:mm:ss} ----${Environment.NewLine}");
+		try { fs.Write(separator, 0, separator.Length); fs.Flush(); } catch { };
+
+		var entry = new SessionLog { Stream = fs, Path = path, Decoder = Encoding.UTF8.GetDecoder(), Buffer = new System.Text.StringBuilder(), Cursor = 0 };
+		lock (_logLock) _logs[id] = entry;
+
+		pty.RawOutput += bytes => AppendLog(id, bytes);
+
+		PostToWeb(new { type = "logStatus", id, active = true, path });
+		Log.Write($"[{id}] logging started -> {path}");
+    }
+
+	private void AppendLog(string id, byte[] bytes)
+	{
+		SessionLog? entry;
+		lock ( _logLock) {  _logs.TryGetValue(id, out entry); }
+        if (entry == null) return;
+		try
+		{
+			// Decode bytes using the per-session Decoder to handle multibyte sequences split across chunks
+			int maxChars = entry.Decoder.GetCharCount(bytes, 0, bytes.Length);
+			char[] chars = new char[maxChars];
+			int charCount = entry.Decoder.GetChars(bytes, 0, bytes.Length, chars, 0);
+			string raw = new string(chars, 0, charCount);
+			// Remove ANSI escape sequences but keep CR/LF and backspace
+			string cleaned = _ansiRegex.Replace(raw, "");
+			cleaned = _ctrlRegex.Replace(cleaned, "");
+
+			// Process characters to handle CR (\r), LF (\n) and backspace (\b)
+			for (int i = 0; i < cleaned.Length; i++)
+			{
+				char c = cleaned[i];
+				if (c == '\r')
+				{
+					// carriage return -> move cursor to line start
+					entry.Cursor = 0;
+					continue;
+				}
+				else if (c == '\n')
+				{
+					// newline -> flush current buffer + newline to stream
+					var line = entry.Buffer.ToString();
+					var toWrite = line + Environment.NewLine;
+					var outBytes = Encoding.UTF8.GetBytes(toWrite);
+					lock (entry.Stream)
+					{
+						entry.Stream.Write(outBytes, 0, outBytes.Length);
+						entry.Stream.Flush();
+					}
+					entry.Buffer.Clear();
+					entry.Cursor = 0;
+					continue;
+				}
+				else if (c == '\b')
+				{
+					// backspace -> remove previous char if any
+					if (entry.Cursor > 0)
+					{
+						entry.Buffer.Remove(entry.Cursor - 1, 1);
+						entry.Cursor--;
+					}
+					continue;
+				}
+				else
+				{
+					// printable char -> write/overwrite at cursor
+					if (entry.Cursor < entry.Buffer.Length)
+					{
+						entry.Buffer[entry.Cursor] = c;
+					}
+					else
+					{
+						entry.Buffer.Append(c);
+					}
+					entry.Cursor++;
+				}
+			}
+		}
+		catch { };
+    }
+
+    private void CloseLog(string id)
+	{
+		SessionLog? entry;
+        lock (_logLock) { _logs.TryGetValue(id, out entry); if (entry != null) _logs.Remove(id); }
+        if (entry == null) return;
+        try
+        {
+            lock (entry.Stream)
+            {
+				// Flush any pending decoder state (remaining chars) to the log
+				try
+				{
+					// flush any remaining decoder buffer (if any) - attempt decode of zero-length to flush state
+					try
+					{
+						char[] remBuf = new char[1024];
+						int remCount = entry.Decoder.GetChars(Array.Empty<byte>(), 0, 0, remBuf, 0);
+						if (remCount > 0)
+						{
+							var remStr = new string(remBuf, 0, remCount);
+							remStr = _ansiRegex.Replace(remStr, "");
+							remStr = _ctrlRegex.Replace(remStr, "");
+							var remBytes = Encoding.UTF8.GetBytes(remStr);
+							entry.Stream.Write(remBytes, 0, remBytes.Length);
+						}
+					}
+					catch { }
+
+					// flush any remaining buffered line (no terminating newline)
+					if (entry.Buffer.Length > 0)
+					{
+						var remLine = entry.Buffer.ToString();
+						var remBytes2 = Encoding.UTF8.GetBytes(remLine + Environment.NewLine);
+						entry.Stream.Write(remBytes2, 0, remBytes2.Length);
+						entry.Buffer.Clear();
+						entry.Cursor = 0;
+					}
+				}
+				catch { }
+                entry.Stream.Flush();
+                entry.Stream.Dispose();
+            }
+            Log.Write($"[{id}] logging stopped -> {entry.Path}");
+        }
+        catch { }
+        ;
+    }
+
+	private void OpenLogDir()
+	{
+		try
+		{
+			var dir = ResolveLogDir();
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = dir,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            PostToWeb(new { type = "error", message = $"Failed to open log directory: {ex.Message}" });
+        }
+	}
+
+	private void PickLogDir()
+	{
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Select Logs Folder",
+			FileName = "Select Folder",
+			Filter = "Folders|*.folder",
+			InitialDirectory = ResolveLogDir(),
+            OverwritePrompt = false,
+            CheckPathExists = true,
+        };
+        if (dlg.ShowDialog() == true )
+        {
+            var selectedDir = Path.GetDirectoryName(dlg.FileName);
+			if (!string.IsNullOrWhiteSpace(selectedDir))
+			{
+				_prefs.Current.LogDir = selectedDir;
+				_prefs.Save();
+				PostToWeb(new { type = "logDirPicked", path = selectedDir });
+				SendPrefs();
+			}
+        }
+    }
+
+    private void SaveSnippet(JsonElement root)
 	{
 		var s = root.GetProperty("snippet");
 		var id = s.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
