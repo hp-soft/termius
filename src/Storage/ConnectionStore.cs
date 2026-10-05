@@ -5,9 +5,7 @@ namespace SshManager.Storage;
 
 public sealed class ConnectionStore
 {
-    private static readonly string Dir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SshManager");
-
+    private static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SshManager");
     private static readonly string FilePath = Path.Combine(Dir, "connections.json");
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
     public List<Connection> Items { get; private set; } = new();
@@ -26,6 +24,7 @@ public sealed class ConnectionStore
     {
         Directory.CreateDirectory(Dir);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(Items, JsonOpts));
+        Console.WriteLine($"Saved {Items.Count} connections to {FilePath}");
     }
 
     public Connection? Get(string id) => Items.FirstOrDefault(c => c.Id == id);
@@ -35,12 +34,14 @@ public sealed class ConnectionStore
         var i = Items.FindIndex(x => x.Id == c.Id);
         if (i >= 0) Items[i] = c; else Items.Add(c);
         Save();
+        Console.WriteLine($"Connection updated: {c.Name}");
     }
 
     public void Remove(string id)
     {
         Items.RemoveAll(c => c.Id == id);
         Save();
+        Console.WriteLine($"Connection removed: {id}");
     }
 
     public static void SetPassword(Connection c, string? plain)

@@ -13,22 +13,18 @@ public sealed class ConPty : IDisposable
 	private SafeFileHandle? _outputRead;       // lemos aqui <- stdout/stderr do shell
 	private SafeFileHandle? _inputRead;
 	private SafeFileHandle? _outputWrite;
-		
 	private FileStream? _writer;
 	private FileStream? _reader;
 	private PROCESS_INFORMATION _procInfo;
 	private Thread? _readThread;
 	private volatile bool _disposed;
-		
 	// Disparado (em thread background) quando shell produz saída
 	public event Action<string>? Output;
-		
 	// Disparado quando o processo do shell termina
 	public event Action<int>? Exited;
-
 	public event Action<byte[]>? RawOutput;
-
-    public void Start(string command, string cwd, short cols, short rows)
+    
+	public void Start(string command, string cwd, short cols, short rows)
 	{
 		// Pipes (InputRead/Writer) e (outputRead/Writer)
 		if(!CreatePipe(out _inputRead, out _inputWrite, IntPtr.Zero, 0 ))
@@ -242,7 +238,7 @@ public sealed class ConPty : IDisposable
 	
 	[StructLayout(LayoutKind.Sequential)]
 	private struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
-		
+	
 	[StructLayout(LayoutKind.Sequential)]
 	private struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
 		
@@ -281,4 +277,4 @@ public sealed class ConPty : IDisposable
 
 	[DllImport("kernel32.dll", SetLastError = true)]
 	private static extern bool CloseHandle(IntPtr hObject);
-}	
+}

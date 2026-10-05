@@ -4,6 +4,7 @@ const tabs = {};
 let activeTab = null;
 let focusedPane = null;
 let seq = 0, tabSeq = 0;
+const sftpProgress = {}; // map tabId -> { file -> { el, bar, label } }
 function post(msg) { if (bridge) bridge.postMessage(msg); }
 
 // Coalesce expensive fit.fit() calls per-session to avoid forced reflow storms.
@@ -15,6 +16,137 @@ function scheduleFit(s) {
     requestAnimationFrame(() => {
         s._fitPending = false;
         try { s.fit.fit(); post({ type: 'resize', id: s.sid, cols: s.term.cols, rows: s.term.rows }); } catch (_) { }
+    });
+}
+
+// Create a new SFTP tab UI inside the web UI
+function newSftpTab(conn, originTabId, remoteHome) {
+    // create a proper tab id like newTab does
+    const tabId = 'T' + (++tabSeq);
+    const tabEl = document.createElement('div');
+    tabEl.className = 'tab on sftp';
+    tabEl.id = 'tab-' + tabId;
+    tabEl.draggable = true;
+    tabEl.onclick = (e) => { if (!e.target.classList.contains('x')) activateTab(tabId); };
+    tabEl.innerHTML = '<span class="st"></span><span class="dot"></span><span class="rec"></span>' +
+        '<span class="label" title="Double-Click to Rename">SFTP: ' + (conn.Name || conn.Host) + '</span>' +
+        '<span class="x" title="Fechar aba">&#10005;</span>';
+    tabEl.querySelector('.x').onclick = (e) => { e.stopPropagation(); closeTab(tabId); };
+    tabEl.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); showTabMenu(tabId, e.clientX, e.clientY); });
+    setupTabDrag(tabEl, tabId);
+    document.getElementById('tabs').insertBefore(tabEl, document.getElementById('newtab'));
+
+    const container = document.createElement('div');
+    container.className = 'tab-panes';
+    container.id = 'panes-' + tabId;
+    document.getElementById('terminals').appendChild(container);
+
+    const paneEl = document.createElement('div');
+    paneEl.className = 'pane sftp-pane';
+    paneEl.dataset.sid = '';
+
+    const bar = document.createElement('div');
+    bar.className = 'pane-bar';
+    bar.innerHTML = '<span class="pane-title">SFTP ' + (conn.Name || conn.Host) + '</span>';
+
+    const content = document.createElement('div');
+    content.className = 'sftp-content';
+    content.innerHTML = '<div class="sftp-local" id="sftp-local-' + tabId + '">'
+        + '<div class="sftp-header"><button class="sftp-up-local">..</button><input class="sftp-path-local" id="sftp-path-local-' + tabId + '" value="" /></div>'
+        + '<div class="sftp-list" id="sftp-list-local-' + tabId + '"></div>'
+        + '</div>'
+        + '<div class="sftp-split"></div>'
+        + '<div class="sftp-remote" id="sftp-remote-' + tabId + '">'
+        + '<div class="sftp-header"><button class="sftp-up-remote">..</button><input class="sftp-path-remote" id="sftp-path-remote-' + tabId + '" value="/" /></div>'
+        + '<div class="sftp-list" id="sftp-list-remote-' + tabId + '"></div>'
+        + '</div>';
+
+    paneEl.appendChild(bar);
+    const paneTerm = document.createElement('div');
+    paneTerm.className = 'pane-term';
+    paneTerm.appendChild(content);
+    paneEl.appendChild(paneTerm);
+    container.appendChild(paneEl);
+
+    tabs[tabId] = { id: tabId, tabEl, container, connId: conn.Id };
+    activateTab(tabId);
+
+    // request initial listings: local HOME and remote HOME
+    post({ type: 'sftpListLocal', tabId: tabId, path: undefined });
+    post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: remoteHome || '/' });
+
+    // wire header controls
+    const upLocal = content.querySelector('.sftp-up-local');
+    const pathLocal = content.querySelector('.sftp-path-local');
+    const listLocal = content.querySelector('.sftp-list');
+    const upRemote = content.querySelector('.sftp-up-remote');
+    const pathRemote = content.querySelector('.sftp-path-remote');
+    const listRemote = content.querySelector('.sftp-list');
+    const cancelBtn = document.getElementById('sftp-cancel-' + tabId);
+    const progressContainer = document.getElementById('sftp-progress-' + tabId);
+    sftpProgress[tabId] = {};
+    if (cancelBtn) {
+        cancelBtn.onclick = (e) => { e.preventDefault(); post({ type: 'sftpCancelUpload', tabId }); };
+        cancelBtn.style.display = 'none';
+    }
+
+    upLocal.onclick = () => {
+        const cur = pathLocal.value || '';
+        const parent = cur.split(/[\\/]+/).slice(0, -1).join('/');
+        pathLocal.value = parent || '';
+        post({ type: 'sftpListLocal', tabId: tabId, path: pathLocal.value });
+    };
+    pathLocal.onkeydown = (e) => { if (e.key === 'Enter') post({ type: 'sftpListLocal', tabId: tabId, path: pathLocal.value }); };
+
+    upRemote.onclick = () => {
+        const cur = pathRemote.value || '/';
+        if (cur === '/' || cur === '') return;
+        const parts = cur.split('/').filter(Boolean);
+        parts.pop();
+        const parent = '/' + parts.join('/');
+        pathRemote.value = parent || '/';
+        post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value });
+    };
+    pathRemote.onkeydown = (e) => { if (e.key === 'Enter') post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value }); };
+
+    // simple drag handlers: local -> remote upload
+    const localEl = content.querySelector('.sftp-local');
+    const remoteEl = content.querySelector('.sftp-remote');
+    remoteEl.addEventListener('dragover', (e) => { e.preventDefault(); });
+    remoteEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        try {
+            // support multiple paths encoded as JSON or newline separated
+            let data = e.dataTransfer.getData('application/json');
+            let paths = [];
+            if (data) {
+                try { paths = JSON.parse(data); } catch { paths = []; }
+            }
+            if (!paths || paths.length === 0) {
+                data = e.dataTransfer.getData('text/plain');
+                if (!data) return;
+                paths = data.split(/\r?\n/).filter(Boolean);
+            }
+            if (!paths || paths.length === 0) return;
+            const remotePathInput = document.getElementById('sftp-path-remote-' + tabId);
+            const remoteDir = (remotePathInput && remotePathInput.value) ? remotePathInput.value : '/';
+            // send upload request for multiple files
+            post({ type: 'sftpUpload', tabId: tabId, connId: conn.Id, localPath: paths, remoteDir: remoteDir });
+        } catch (_) { }
+    });
+
+    // remote -> local download
+    localEl.addEventListener('dragover', (e) => { e.preventDefault(); });
+    localEl.addEventListener('drop', (e) => {
+        e.preventDefault();
+        try {
+            const data = e.dataTransfer.getData('text/plain');
+            if (!data) return;
+            // download into current local path shown in the UI
+            const localPathInput = document.getElementById('sftp-path-local-' + tabId);
+            const localDir = localPathInput && localPathInput.value ? localPathInput.value : undefined;
+            post({ type: 'sftpDownload', tabId: tabId, connId: conn.Id, remotePath: data, localDir: localDir });
+        } catch (_) { }
     });
 }
 function scheduleFitBySid(sid) {
@@ -690,6 +822,9 @@ function beginRenameTab(tabId) {
     let done = false;
     const finish = (save) => {
         if (done) return;
+        done = true;
+        input.onblur = null;
+        input.onkeydown = null;
         const val = input.value.trim();
         if (save && val) {
             labelEl.textContent = val;
@@ -697,7 +832,8 @@ function beginRenameTab(tabId) {
             const s = first && sessions[first.dataset.sid];
             if (s) s.spec.label = val;
         }
-        input.remove();
+        try { input.remove(); } catch (_) { }
+        
         labelEl.style.display = '';
     };
 
@@ -745,7 +881,7 @@ function focusPane(sid) {
 }
 
 function updateStatus(s) {
-    dsocument.getElementById('sb-conn').innerHTML = '&#9679; <span class="k"></span>';
+    document.getElementById('sb-conn').innerHTML = '&#9679; <span class="k"></span>';
     document.querySelector('#sb-conn .k').textContent = s.spec.label;
     document.getElementById('sb-enc').textContent = s.spec.status || '';
 }
@@ -883,32 +1019,49 @@ function closeTab(tabId,skipSessions) {
 }
 
 const logging = {};
+const clipCapturing = {};
 
 function tabLoggingSids(tabId) {
     const t = tabs[tabId];
     if (!t) return [];
-    return [...t.container.querySelectorAll('.pane')].map(p => p.dataset.sid);
+    const sids = [...t.container.querySelectorAll('.pane')].map(p => p.dataset.sid).filter(Boolean);
+    return sids;
 }
 function isTabLogging(tabId) {
     return tabLoggingSids(tabId).some(sid => logging[sid]);
 }
+
+function isTabClipping(tabId) {
+    return tabLoggingSids(tabId).some(sid => clipCapturing[sid]);
+}
 function updateTabRecIndicator(tabId) {
     const t = tabs[tabId];
     if (!t) return;
-    const on = isTabLogging(tabId);
-    t.tabEl.classList.toggle('logging', on);
+    const onLog = isTabLogging(tabId);
+    const onClip = isTabClipping(tabId);
+
+    t.tabEl.classList.toggle('logging', onLog);
+    t.tabEl.classList.toggle('clip-capturing', onClip && !onLog);
+
     const rec = t.tabEl.querySelector('.rec');
     if (rec) {
-        const paths = tabLoggingSids(tabId).map(sid => logging[sid]).filter(Boolean);
-        rec.title = paths.length ? ('Recording to:\n' + paths.join('\n')) : '';
+        if (onLog) {
+            const paths = tabLoggingSids(tabId).map(sid => logging[sid]).filter(p => typeof p === 'string');
+            rec.title = paths.length ? ('Recording to:\n' + paths.join('\n')) : '';
+        } else if (onClip) {
+            rec.title = 'Capturing to clipboard (Stop to Copy)';
+        } else {
+            rec.title = '';
+        }
     }
 }
 function startTabLogging(tabId) {
     const t = tabs[tabId];
     if (!t) return;
-    const label = t.tabEl.querySelector('.label').textContent || tabId;
+    const label = t.tabEl.querySelector('.label') && t.tabEl.querySelector('.label').textContent || tabId;
     tabLoggingSids(tabId).forEach(sid => {
         if (logging[sid]) return;
+        logging[sid] = true;
         post({ type: 'startLog', id: sid, label });
     });
 }
@@ -916,9 +1069,43 @@ function stopTabLogging(tabId) {
     const t = tabs[tabId];
     if (!t) return;
     tabLoggingSids(tabId).forEach(sid => {
+        delete logging[sid];
         // ask backend to stop logging for each session in the tab
         post({ type: 'stopLog', id: sid });
     });
+}
+
+function startTabClipCapture(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    tabLoggingSids(tabId).forEach(sid => {
+        if(clipCapturing[sid]) return
+        clipCapturing[sid] = true;
+        post({ type: 'startClipCapture', id: sid });
+    });
+    updateTabRecIndicator(tabId);
+    showToast('Capturing to clipboard. Stop to copy.', 3000);
+}
+
+function stopTabClipCapture(tabId) {
+    const t = tabs[tabId];
+    if (!t) return;
+    tabLoggingSids(tabId).forEach(sid => {
+        if(!clipCapturing[sid]) return;
+        delete clipCapturing[sid];
+        post({ type: 'stopClipCapture', id: sid });
+    });
+    updateTabRecIndicator(tabId);
+}
+
+function showToast(message, duration) {
+    const existing = document.getElementById('.toast-notify');
+    if (existing) existing.remove();
+    const toast = document.createElement('div');
+    toast.className = 'toast-notify';
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
 }
 
 let tabMenuEl = null;
@@ -942,17 +1129,37 @@ function showTabMenu(tabId, x, y) {
     const menu = document.createElement('div');
     menu.className = 'tab-menu';
     const isLog = isTabLogging(tabId);
-    const items = [
-        { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
-        isLog
-            ? { label: 'Stop Recording', action: () => stopTabLogging(tabId) }
-            : { label: 'Start Recording', action: () => startTabLogging(tabId) },
-        { sep: true },
-        { label: 'Open Log Directory', action: () => post({ type: 'openLogDir' }) },
-        { label: 'Setup Log Directory', action: () => post({ type: 'pickLogDir' }) },
-        { sep: true },
-        { label: 'Close Tab', action: () => closeTab(tabId) },
-    ];
+    const isClip = isTabClipping(tabId);
+    // determine connId for this tab (if any)
+    let connIdForTab = null;
+    for (const sid in sessions) {
+        const s = sessions[sid];
+        if (s && s.tabId === tabId) { connIdForTab = (s.spec && s.spec.connId) || null; break; }
+    }
+    let items = [];
+    // If this is an SFTP tab, only offer Rename and Close
+    if (t.tabEl && (t.tabEl.classList.contains('sftp') || (t.tabEl.className || '').indexOf('sftp') !== -1)) {
+        items = [
+            { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
+            { label: 'Close Tab', action: () => closeTab(tabId) },
+        ];
+    } else {
+        items = [
+            { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
+            { label: 'Open SFTP', action: () => post({ type: 'openSftp', tabId, connId: connIdForTab }) },
+            isLog
+                ? { label: 'Stop Recording', action: () => stopTabLogging(tabId) }
+                : { label: 'Start Recording', action: () => startTabLogging(tabId) },
+            isClip
+                ? { label: 'Stop Clip Capture', action: () => stopTabClipCapture(tabId) }
+                : { label: 'Start Clip Capture', action: () => startTabClipCapture(tabId) },
+            { sep: true },
+            { label: 'Open Log Directory', action: () => post({ type: 'openLogDir' }) },
+            { label: 'Setup Log Directory', action: () => post({ type: 'pickLogDir' }) },
+            { sep: true },
+            { label: 'Close Tab', action: () => closeTab(tabId) },
+        ];
+    }
     items.forEach(it => {
         if (it.sep) {
             const sep = document.createElement('div');
@@ -1036,6 +1243,184 @@ if (bridge) {
                 try { console.log('[ui] forwarding paste to backend as input'); } catch (_) { }
                 post({ type: 'input', id: m.id, data: m.data });
             }
+        } else if (m.type === 'openSftpCreated') {
+            // { tabId, ok, conn, remoteHome }
+            if (!m.ok) { console.warn('[sftp] open failed', m.message); return; }
+            try {
+                const conn = m.conn;
+                const remoteHome = m.remoteHome || '/';
+                newSftpTab(conn, m.tabId, remoteHome);
+            } catch (e) { console.warn(e); }
+        } else if (m.type === 'sftpLocalListResult') {
+            // { tabId, path, items }
+            const listEl = document.getElementById('sftp-list-local-' + m.tabId);
+            const pathEl = document.getElementById('sftp-path-local-' + m.tabId);
+            if (pathEl && m.path !== undefined) pathEl.value = m.path || '';
+            if (!listEl) return;
+            listEl.innerHTML = '';
+            (m.items || []).forEach(it => {
+                const row = document.createElement('div');
+                row.className = 'sftp-item';
+                row.dataset.full = it.fullName;
+                row.draggable = true;
+                row.addEventListener('dragstart', (e) => {
+                    try {
+                        // if multiple selected in this list, send JSON array of paths
+                        const parent = row.parentElement;
+                        const selected = parent.querySelectorAll('.sftp-item.selected');
+                        let paths = [];
+                        if (selected && selected.length > 1) {
+                            selected.forEach(s => paths.push(s.dataset.full));
+                        } else {
+                            paths = [it.fullName];
+                        }
+                        e.dataTransfer.setData('application/json', JSON.stringify(paths));
+                        e.dataTransfer.setData('text/plain', paths.join('\n'));
+                    } catch (_) { }
+                });
+                // selection handling
+                row.addEventListener('click', (e) => {
+                    const ctrl = e.ctrlKey || e.metaKey;
+                    const parent = row.parentElement;
+                    if (!ctrl) {
+                        parent.querySelectorAll('.sftp-item.selected').forEach(x => x.classList.remove('selected'));
+                    }
+                    row.classList.toggle('selected');
+                });
+                // build columns: icon, name, size, owner, mtime, perms (ls -la like)
+                const icon = document.createElement('div'); icon.textContent = it.isDirectory ? '📁' : '📄'; icon.style.width = '28px';
+                const name = document.createElement('div'); name.textContent = it.name; name.style.flex = '1';
+                const size = document.createElement('div'); size.textContent = it.isDirectory ? '<dir>' : (it.size || 0).toString(); size.style.width = '100px'; size.style.textAlign = 'right';
+                const owner = document.createElement('div'); owner.textContent = it.owner || ''; owner.style.width = '120px'; owner.style.opacity = '0.9';
+                const mtime = document.createElement('div'); mtime.textContent = it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : ''; mtime.style.width = '160px';
+                const perms = document.createElement('div'); perms.textContent = it.permissions || ''; perms.style.width = '120px'; perms.style.opacity = '0.8';
+                row.appendChild(icon); row.appendChild(name); row.appendChild(size); row.appendChild(owner); row.appendChild(mtime); row.appendChild(perms);
+                if (it.isDirectory) {
+                    name.style.fontWeight = '600';
+                    row.addEventListener('dblclick', () => { pathEl.value = it.fullName; post({ type: 'sftpListLocal', tabId: m.tabId, path: it.fullName }); });
+                }
+                listEl.appendChild(row);
+            });
+        } else if (m.type === 'sftpRemoteListResult') {
+            // { tabId, path, items }
+            const listEl = document.getElementById('sftp-list-remote-' + m.tabId);
+            const pathEl = document.getElementById('sftp-path-remote-' + m.tabId);
+            if (pathEl && m.path !== undefined) pathEl.value = m.path || '/';
+            if (!listEl) return;
+            listEl.innerHTML = '';
+            (m.items || []).forEach(it => {
+                const row = document.createElement('div');
+                row.className = 'sftp-item';
+                row.dataset.full = it.fullName;
+                row.draggable = true;
+                row.addEventListener('dragstart', (e) => {
+                    try {
+                        // if multiple selected in this list, send JSON array of paths
+                        const parent = row.parentElement;
+                        const selected = parent.querySelectorAll('.sftp-item.selected');
+                        let paths = [];
+                        if (selected && selected.length > 1) {
+                            selected.forEach(s => paths.push(s.dataset.full));
+                        } else {
+                            paths = [it.fullName];
+                        }
+                        e.dataTransfer.setData('application/json', JSON.stringify(paths));
+                        e.dataTransfer.setData('text/plain', paths.join('\n'));
+                    } catch (_) {}
+                });
+                // selection handling
+                row.addEventListener('click', (e) => {
+                    const ctrl = e.ctrlKey || e.metaKey;
+                    const parent = row.parentElement;
+                    if (!ctrl) {
+                        parent.querySelectorAll('.sftp-item.selected').forEach(x => x.classList.remove('selected'));
+                    }
+                    row.classList.toggle('selected');
+                });
+                const name = document.createElement('div'); name.textContent = it.name; name.style.flex = '1';
+                const perms = document.createElement('div'); perms.textContent = it.permissions || ''; perms.style.width = '140px'; perms.style.opacity = '0.85'; perms.style.fontFamily = 'monospace';
+                const owner = document.createElement('div'); owner.textContent = it.owner || ''; owner.style.width = '120px'; owner.style.opacity = '0.9';
+                const group = document.createElement('div'); group.textContent = it.group || ''; group.style.width = '120px'; group.style.opacity = '0.9';
+                const size = document.createElement('div'); size.textContent = it.isDirectory ? '<dir>' : (it.size || 0).toString(); size.style.width = '100px'; size.style.textAlign = 'right';
+                const mtime = document.createElement('div'); mtime.textContent = it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : ''; mtime.style.width = '160px';
+                row.appendChild(perms); row.appendChild(owner); row.appendChild(group); row.appendChild(size); row.appendChild(mtime); row.appendChild(name);
+                if (it.isDirectory) {
+                    name.style.fontWeight = '600';
+                    row.addEventListener('dblclick', () => { pathEl.value = it.fullName; post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: it.fullName }); });
+                }
+                listEl.appendChild(row);
+            });
+        } else if (m.type === 'sftpUploadResult') {
+            // legacy single-result fallback
+            if (!m.ok) showToast('SFTP upload failed: ' + (m.message || 'error'), 4000);
+            else showToast('Uploaded: ' + (m.localPath || ''), 3000);
+        } else if (m.type === 'sftpDownloadResult') {
+            if (!m.ok) showToast('SFTP download failed: ' + (m.message || 'error'), 4000);
+            else showToast('Downloaded: ' + (m.localPath || ''), 3000);
+        } else if (m.type === 'sftpUploadStarted') {
+            // create UI entries for each file
+            try {
+                const tabId = m.tabId;
+                const files = m.files || (m.file ? [m.file] : []);
+                const container = document.getElementById('sftp-progress-' + tabId);
+                if (!container) return;
+                container.innerHTML = '';
+                sftpProgress[tabId] = {};
+                const cancel = document.getElementById('sftp-cancel-' + tabId);
+                if (cancel) cancel.style.display = '';
+                files.forEach(f => {
+                    const ent = document.createElement('div'); ent.className = 'sftp-progress-item';
+                    const label = document.createElement('div'); label.className = 'sftp-progress-label'; label.textContent = f;
+                    const barWrap = document.createElement('div'); barWrap.className = 'sftp-progress-bar-wrap';
+                    const bar = document.createElement('div'); bar.className = 'sftp-progress-bar'; bar.style.width = '0%';
+                    barWrap.appendChild(bar);
+                    ent.appendChild(label); ent.appendChild(barWrap);
+                    container.appendChild(ent);
+                    sftpProgress[tabId][f] = { el: ent, bar, label };
+                });
+            } catch (_) {}
+        } else if (m.type === 'sftpUploadProgress') {
+            try {
+                const tabId = m.tabId;
+                const map = sftpProgress[tabId] || {};
+                const key = m.file;
+                const entry = map[key];
+                if (!entry) return;
+                const pct = m.total && m.total > 0 ? Math.floor((m.uploaded / m.total) * 100) : 0;
+                entry.bar.style.width = pct + '%';
+                entry.label.textContent = key + ' - ' + pct + '%';
+            } catch (_) {}
+        } else if (m.type === 'sftpUploadFinished') {
+            try {
+                const tabId = m.tabId;
+                const map = sftpProgress[tabId] || {};
+                const key = m.file;
+                const entry = map[key];
+                if (entry) {
+                    if (m.ok) { entry.bar.style.width = '100%'; entry.label.textContent = key + ' - done'; }
+                    else { entry.label.textContent = key + ' - error: ' + (m.message || ''); entry.el.classList.add('failed'); }
+                    // remove after a short delay
+                    setTimeout(() => { try { entry.el.remove(); delete map[key]; } catch (_) {} }, 2500);
+                }
+                // if all done, clear container and hide cancel
+                if (Object.keys(map).length === 0) {
+                    const c = document.getElementById('sftp-progress-' + tabId); if (c) c.innerHTML = '';
+                    const cancel = document.getElementById('sftp-cancel-' + tabId); if (cancel) cancel.style.display = 'none';
+                }
+            } catch (_) {}
+        } else if (m.type === 'sftpUploadCanceled') {
+            try {
+                const tabId = m.tabId;
+                const c = document.getElementById('sftp-progress-' + tabId);
+                if (c) { const notice = document.createElement('div'); notice.className = 'sftp-progress-cancel'; notice.textContent = 'Upload canceled'; c.appendChild(notice); }
+                // cleanup map and hide cancel
+                delete sftpProgress[tabId];
+                const cancel = document.getElementById('sftp-cancel-' + tabId); if (cancel) cancel.style.display = 'none';
+            } catch (_) {}
+        } else if (m.type === 'sftpRefreshRemote') {
+            post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: m.path });
+        } else if (m.type === 'sftpRefreshLocal') {
+            post({ type: 'sftpListLocal', tabId: m.tabId, path: m.path });
         } else if (m.type === 'keyPicked') {
             document.getElementById('f-key').value = m.path;
         } else if (m.type === 'connSaved') {
@@ -1049,6 +1434,17 @@ if (bridge) {
             const s = sessions[sid];
             if (m.active) logging[sid] = m.path || true;
             else delete logging[sid];
+            if (s) updateTabRecIndicator(s.tabId);
+        } else if (m.type === 'clipCaptureStatus') {
+            const sid = m.id;
+            const s = sessions[sid];
+            if (m.active) clipCapturing[sid] = true;
+            else {
+                delete clipCapturing[sid];
+                if (m.linesCount > 0) {
+                    showToast('Copied ' + m.linesCount + 'lines / ' + m.charsCount + ' caracters to clipboard.', 3000);
+                }
+            }
             if (s) updateTabRecIndicator(s.tabId);
         } else if (m.type === 'logDirPicked') {
             try { console.log('[ui] logDirPicked:', m.path); } catch (_) { }

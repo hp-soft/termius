@@ -13,12 +13,24 @@ using System.Text;
 using System.Text.RegularExpressions;
 
 namespace SshManager;
+
+// Class Log
 internal static class Log
 {
     private static readonly object _lock = new object();
-    public static string FileLocation { get; } =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SshManager.log");
+    public static string FileLocation { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SshManager.log");
 
+	public static void Debug(string message)
+	{
+		try
+		{
+#if DEBUG
+			Write($"[DEBUG] {message}");
+			Console.WriteLine($"[DEBUG] {message}");
+#endif
+        }
+        catch { }
+    }
     public static void Write(string message)
     {
         try
@@ -37,6 +49,9 @@ internal static class Log
 
 public partial class MainWindow : Window
 {
+	private readonly object _sftpUploadLock = new();
+	private readonly Dictionary<string, System.Threading.CancellationTokenSource> _sftpUploadCts = new();
+
 	private readonly Dictionary<string, ConPty> _sessions = new();
 	private readonly ConnectionStore _store = new();
 	private readonly FolderStore _folders = new();
@@ -50,13 +65,27 @@ public partial class MainWindow : Window
 		public required Decoder Decoder;
 		public required System.Text.StringBuilder Buffer;
 		public int Cursor;
-	}
+		public int ConsecutiveBlankLines;
+    }
 
-	private readonly Dictionary<string, SessionLog> _logs = new();
+	private sealed class ClipboardCapture
+    {
+        public required Decoder Decoder;
+		public required System.Text.StringBuilder FullText;
+        public required System.Text.StringBuilder LineBuffer;
+        public int Cursor;
+		public int ConsecutiveBlankLines;
+    }
+
+    private readonly Dictionary<string, SessionLog> _logs = new();
 	private readonly object _logLock = new();
 
-	// Regex to strip common ANSI CSI sequences and control chars (preserve CR/LF and keep BS '\b' for processing)
-	private static readonly Regex _ansiRegex = new(@"\x1B\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled);
+	private readonly Dictionary<string, ClipboardCapture> _clipCaptures = new();
+	private readonly object _clipLock = new();
+
+
+    // Regex to strip common ANSI CSI sequences and control chars (preserve CR/LF and keep BS '\b' for processing)
+    private static readonly Regex _ansiRegex = new(@"\x1B\[[0-?]*[ -/]*[@-~]", RegexOptions.Compiled);
 	// keep backspace (\x08) so we can process it; remove other C0 except CR(0x0D) and LF(0x0A)
 	private static readonly Regex _ctrlRegex = new(@"[\x00-\x07\x0B\x0C\x0E-\x1F\x7F]", RegexOptions.Compiled);
 
@@ -85,8 +114,7 @@ public partial class MainWindow : Window
 		};
 		// A margem que expoe as bordas para resize so faz sentido no estado Normal
 		// maximizado ela viraria uma borda vazia em volta do conteudo
-		StateChanged += (_, _) =>
-			RootGrid.Margin = WindowState == WindowState.Maximized ? new Thickness(0) : new Thickness(6);
+		StateChanged += (_, _) => RootGrid.Margin = WindowState == WindowState.Maximized ? new Thickness(0) : new Thickness(6);
 	}
 
 	private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -117,7 +145,6 @@ public partial class MainWindow : Window
 					Marshal.StructureToPtr(mmi, lParam, true);
 					handled = true;
 				}
-
 			}
 		}
 		return IntPtr.Zero;
@@ -127,7 +154,6 @@ public partial class MainWindow : Window
 	[StructLayout(LayoutKind.Sequential)] private struct RECT { public int Left, Top, Right, Bottom; }
 	[StructLayout(LayoutKind.Sequential)]
 	private struct MINMAXINFO { public POINT ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize; }
-
 	[StructLayout(LayoutKind.Sequential)]
 	private struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public int dwFlags; }
 
@@ -135,12 +161,9 @@ public partial class MainWindow : Window
 	[DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
 
 	private void OnMinimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-
 	private void OnMaximize(object sender, RoutedEventArgs e)
 		=> WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
-
 	private void OnClose(object sender, RoutedEventArgs e) => Close();
-
 	private async void OnLoaded(object sender, RoutedEventArgs e)
 	{
 		//var userData = Path.Combine(Path.GetTempPath(), "SshManager.WebView2");
@@ -151,9 +174,10 @@ public partial class MainWindow : Window
 		}
 		catch (Exception ex)
 		{
-			MessageBox.Show(
-				"Falha ao inicializar o WebView2:\r\n\r\n" + ex.Message +
-				"\r\n\r\nVerifique se o WebView2 Runtime esta instalado",
+			Log.Write($"[error] Failed to initialize WebView2: {ex.Message}");
+            MessageBox.Show(
+				"Failed to Start WebView2:\r\n\r\n" + ex.Message +
+				"\r\n\r\nCheck WebView2 Runtime installed",
 				"RTermius",
 				MessageBoxButton.OK,
 				MessageBoxImage.Error
@@ -161,7 +185,6 @@ public partial class MainWindow : Window
 			Close();
 		};
 	}
-
 	private async Task InitializeWebViewAsync()
 	{
 		var baseUserData = Path.Combine(Path.GetTempPath(), "SshManager.WebView2");
@@ -174,29 +197,29 @@ public partial class MainWindow : Window
         } 
 		catch (COMException)
 		{
-			var fallback = Path.Combine(baseUserData, "instances",
-				Environment.ProcessId.ToString());
+			var fallback = Path.Combine(baseUserData, "instances", Environment.ProcessId.ToString());
 			env = await CoreWebView2Environment.CreateAsync(null, fallback);
 			await Web.EnsureCoreWebView2Async(env);
 		}
 
 		Web.CoreWebView2.WebMessageReceived += OnWebMessage;
+#if DEBUG
 		// Abrir DevTools automaticamente para depuração (remover após diagnosticar)
 		try { Web.CoreWebView2.OpenDevToolsWindow(); } catch { }
 
-		Web.CoreWebView2.Settings.AreDevToolsEnabled = true;
 
-        // Concede automaticamente o acesso ao clipboard para a origem local
-        // (necessario para o paste com botao direito via navigator.clipboard)
-        Web.CoreWebView2.PermissionRequested += (_, args) =>
+		Web.CoreWebView2.Settings.AreDevToolsEnabled = true;
+#endif
+		// Concede automaticamente o acesso ao clipboard para a origem local
+		// (necessario para o paste com botao direito via navigator.clipboard)
+		Web.CoreWebView2.PermissionRequested += (_, args) =>
 		{
 			if (args.PermissionKind == CoreWebView2PermissionKind.ClipboardRead)
 				args.State = CoreWebView2PermissionState.Allow;
 		};
 
 		var webDir = Path.Combine(AppContext.BaseDirectory, "web");
-		Web.CoreWebView2.SetVirtualHostNameToFolderMapping(
-			"app.local", webDir, CoreWebView2HostResourceAccessKind.Allow);
+		Web.CoreWebView2.SetVirtualHostNameToFolderMapping("app.local", webDir, CoreWebView2HostResourceAccessKind.Allow);
 
 		Web.CoreWebView2.Navigate("https://app.local/index.html");
 	}
@@ -210,14 +233,34 @@ public partial class MainWindow : Window
 			var type = root.GetProperty("type").GetString();
 			var id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
 
+			Log.Debug($"[ws->host] type={type} id={id} json={root}");
+
 			switch (type)
 			{
 				case "start": StartSession(id, root); break;
 				case "startSsh": StartSsh(id, root); break;
+			case "openSftp": OpenSftp(root); break;
+			case "sftpListLocal": HandleSftpListLocal(root); break;
+			case "sftpListRemote": HandleSftpListRemote(root); break;
+			case "sftpUpload": HandleSftpUpload(root); break;
+			case "sftpDownload": HandleSftpDownload(root); break;
+			case "sftpCancelUpload":
+				{
+					var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+					lock (_sftpUploadLock)
+					{
+						if (_sftpUploadCts.ContainsKey(tabId))
+						{
+							try { _sftpUploadCts[tabId].Cancel(); } catch { }
+							_sftpUploadCts.Remove(tabId);
+						}
+					}
+					break;
+				}
 				case "input":
 					{
 						var data = root.GetProperty("data").GetString() ?? "";
-						Console.WriteLine($"[ws->host] input id={id} len={data.Length}");
+						Log.Debug($"[ws->host] input id={id} len={data.Length}");
 						if (_sessions.TryGetValue(id, out var p)) p.Write(data);
 						break;
 					}
@@ -230,6 +273,7 @@ public partial class MainWindow : Window
 				case "close":
 					if (_sessions.Remove(id, out var c)) c.Dispose();
 					CloseLog(id);
+					StopClipCapture(id, copyToClipboard: false);
 					break;
 
 				case "startLog":
@@ -243,7 +287,15 @@ public partial class MainWindow : Window
 					PostToWeb(new { type = "logStatus", id, active = false, path = (string?)null });
 					break;
 
-				case "pickLogDir":
+				case "startClipCapture":
+					StartClipCapture(id);
+					break;
+
+				case "stopClipCapture":
+                    StopClipCapture(id, copyToClipboard: true);
+					break;
+
+                case "pickLogDir":
 					PickLogDir();
 					break;
 
@@ -251,57 +303,95 @@ public partial class MainWindow : Window
 					OpenLogDir();
                     break;
 
-                case "loadConns": SendConns(); break;
-				case "saveConn": SaveConn(root); break;
-				case "deleteConn": _store.Remove(root.GetProperty("connId").GetString() ?? ""); SendConns(); break;
-				case "pickKey": PickKey(); break;
+                case "loadConns": 
+					SendConns(); 
+					break;
 
-				case "loadFolders": SendFolders(); break;
-				case "addFolder": _folders.Add(root.GetProperty("path").GetString() ?? ""); SendFolders(); break;
-				case "removeFolder": _folders.Remove(root.GetProperty("path").GetString() ?? ""); SendFolders(); break;
+				case "saveConn": 
+					SaveConn(root); 
+					break;
 
-				case "loadSnippets": SendSnippets(); break;
-				case "saveSnippet": SaveSnippet(root); break;
-				case "deleteSnippet": _snippets.Remove(root.GetProperty("snippetId").GetString() ?? ""); SendSnippets(); break;
+				case "deleteConn": 
+					_store.Remove(root.GetProperty("connId").GetString() ?? ""); 
+					SendConns(); 
+					break;
 
-				case "loadPrefs": SendPrefs(); break;
-			case "requestPaste":
-			{
-				string txt = "";
-				try
+				case "pickKey": 
+					PickKey(); 
+					break;
+
+				case "loadFolders": 
+					SendFolders(); 
+					break;
+
+				case "addFolder": 
+					_folders.Add(root.GetProperty("path").GetString() ?? ""); 
+					SendFolders(); 
+					break;
+
+				case "removeFolder": 
+					_folders.Remove(root.GetProperty("path").GetString() ?? ""); 
+					SendFolders(); 
+					break;
+
+				case "loadSnippets": 
+					SendSnippets(); 
+					break;
+
+				case "saveSnippet": 
+					SaveSnippet(root); 
+					break;
+
+				case "deleteSnippet": 
+					_snippets.Remove(root.GetProperty("snippetId").GetString() ?? ""); 
+					SendSnippets(); 
+					break;
+
+				case "loadPrefs": 
+					SendPrefs(); 
+					break;
+
+				case "requestPaste":
 				{
-					Dispatcher.Invoke(() => { if (Clipboard.ContainsText()) txt = Clipboard.GetText(); });
+					string txt = "";
+					try
+					{
+						Dispatcher.Invoke(() => { if (Clipboard.ContainsText()) txt = Clipboard.GetText(); });
+					}
+					catch { }
+					Log.Debug($"[requestPaste] id={id} len={(txt ?? "").Length}");
+					
+					// If the session is active on the host, write directly to the pty to avoid extra roundtrips.
+					if (_sessions.TryGetValue(id, out var pty))
+					{
+						try
+						{
+							pty.Write(txt ?? "");
+							Log.Debug($"[requestPaste] wrote { (txt ?? "").Length } bytes directly to session {id}");
+						}
+						catch (Exception ex)
+						{
+							Log.Debug($"[requestPaste] failed to write to session {id}: {ex.Message}");
+							// fallback to sending to web UI so it can forward
+							PostToWeb(new { type = "paste", id = id, data = txt });
+						}
+					}
+					else
+					{
+						// session not present on host side, forward to UI which may handle routing
+						PostToWeb(new { type = "paste", id = id, data = txt });
+					}
+					break;
 				}
-				catch { }
-				var msg = $"[requestPaste] id={id} len={(txt ?? "").Length}";
-				Console.WriteLine(msg);
-			// If the session is active on the host, write directly to the pty to avoid extra roundtrips.
-			if (_sessions.TryGetValue(id, out var pty))
-			{
-				try
-				{
-					pty.Write(txt ?? "");
-					Console.WriteLine($"[requestPaste] wrote { (txt ?? "").Length } bytes directly to session {id}");
-				}
-				catch (Exception ex)
-				{
-					Console.WriteLine($"[requestPaste] failed to write to session {id}: {ex.Message}");
-					// fallback to sending to web UI so it can forward
-					PostToWeb(new { type = "paste", id = id, data = txt });
-				}
-			}
-			else
-			{
-				// session not present on host side, forward to UI which may handle routing
-				PostToWeb(new { type = "paste", id = id, data = txt });
-			}
-				break;
-			}
-				case "savePrefs": SavePrefs(root); break;
+
+				case "savePrefs": 
+					SavePrefs(root); 
+					break;
 			}
 		}
 		catch (Exception ex)
 		{
+			Log.Write($"[error]" + ex.Message);
 			PostToWeb(new { type = "error", message = ex.Message });
 		}
 	}
@@ -311,30 +401,30 @@ public partial class MainWindow : Window
 		var bash = GitBash.Find();
 		if (bash is null)
 		{
-			const string esc = "<-";
+			Log.Write("Git Bash not found. Install Git for Windows or adjust GitBash.Find().");
 			PostToWeb(new { type = "data", id, data =
-				$"\r\n{esc}[31mGit Bash (bash.exe) nao encontrado {esc}[0m\r\n" +
-				"Instale o Git for Windows ou ajuste GitBash.Find().\r\n" });
+				$"\r\nGit Bash (bash.exe) not found\r\n" +
+				"Install Git for Windows or adjust GitBash.Find().\r\n" });
 			return;
 		}
 
 		var (cols, rows) = ReadSize(root);
 		var home = Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.CurrentDirectory;
+		Log.Debug($"\"{bash}\" --login -i ->{home} {cols}x{rows}");
 		Spawn(id, $"\"{bash}\" --login -i", home, cols, rows);
 	}
-
 	private void StartSsh(string id, JsonElement root)
 	{
 		var conn = _store.Get(root.GetProperty("connId").GetString() ?? "" );
-		if (conn is null) { PostToWeb(new { type = "error", message = "Conexao nao encontrada." }); return; }
+		if (conn is null) { PostToWeb(new { type = "error", message = "Connection not found." }); return; }
 
 		var ssh = GitBash.FindSsh();
 		if (ssh is null)
 		{
-			const string esc = "<-";
+			Log.Write("ssh not found");
 			PostToWeb(new { type = "data", id, data =
-				$"\r\n{esc}[31ssh (ssh.exe) nao encontrado {esc}[0m\r\n" +
-				"Instale o Git for Windows (OpenSSH) ou OpenSSH do Windows ou ajuste GitBash.FindSsh().\r\n" });
+				$"ssh (ssh.exe) not found\r\n" +
+				"Install Git for Windows (OpenSSH) or OpenSSH for Windows or adjust GitBash.FindSsh().\r\n" });
 			return;
 		}
 
@@ -347,16 +437,265 @@ public partial class MainWindow : Window
 
 		var (cols, rows) = ReadSize(root);
 		var home = Environment.GetEnvironmentVariable("USERPROFILE") ?? Environment.CurrentDirectory;
-		Spawn(id, $"\"{ssh}\" {args}", home, cols, rows);
+        Log.Debug($"\"{ssh}\" {args} -> {home} {cols}x{rows}");
+        Spawn(id, $"\"{ssh}\" {args}", home, cols, rows);
+	}
+
+	private void OpenSftp(JsonElement root)
+	{
+		// Expect: { tabId, connId }
+		try
+		{
+			var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+			var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+			if (string.IsNullOrEmpty(connId))
+			{
+				PostToWeb(new { type = "openSftpCreated", tabId, ok = false, message = "No connection specified" });
+				return;
+			}
+			var conn = _store.Get(connId);
+			if (conn == null)
+			{
+				PostToWeb(new { type = "openSftpCreated", tabId, ok = false, message = "Connection not found" });
+				return;
+			}
+			// Determine remote home directory and reply with connection info
+			string remoteHome = "/";
+			try
+			{
+				using var tmp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+				remoteHome = tmp.GetWorkingDirectory() ?? "/";
+			}
+			catch (Exception ex)
+			{
+				Log.Write($"[sftp] failed to detect remote home: {ex.Message}");
+			}
+			PostToWeb(new {
+				type = "openSftpCreated",
+				tabId,
+				ok = true,
+				conn = new { conn.Id, conn.Name, conn.Host, conn.Port, conn.User, conn.AuthMethod },
+				remoteHome
+			});
+		}
+		catch (Exception ex)
+		{
+			Log.Write($"[error] openSftp failed: {ex.Message}");
+			PostToWeb(new { type = "openSftpCreated", tabId = "", ok = false, message = ex.Message });
+		}
+	}
+
+	// SFTP operations requested from the web UI
+	private void HandleSftpListLocal(JsonElement root)
+	{
+		try
+		{
+			var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+			var path = root.TryGetProperty("path", out var p) ? p.GetString() ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+			var list = new List<object>();
+			try
+			{
+				foreach (var fi in new DirectoryInfo(path).GetFileSystemInfos())
+				{
+					list.Add(new { name = fi.Name, fullName = fi.FullName, isDirectory = (fi.Attributes & FileAttributes.Directory) != 0 });
+				}
+			}
+			catch (Exception ex) { Log.Write($"[sftp] local list failed: {ex.Message}"); }
+			PostToWeb(new { type = "sftpLocalListResult", tabId, path, items = list });
+		}
+		catch (Exception ex)
+		{
+			Log.Write($"[error] HandleSftpListLocal: {ex.Message}");
+		}
+	}
+
+	private void HandleSftpListRemote(JsonElement root)
+	{
+		try
+		{
+			var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+			var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+			var path = root.TryGetProperty("path", out var p) ? p.GetString() ?? "/" : "/";
+			var conn = _store.Get(connId);
+			if (conn == null) { PostToWeb(new { type = "sftpRemoteListResult", tabId, ok = false, message = "Connection not found" }); return; }
+			try
+			{
+				using var sftp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+				var items = new List<object>();
+				foreach (var it in sftp.ListDirectory(path))
+				{
+					items.Add(new
+					{
+						name = it.Name,
+						fullName = it.FullName,
+						isDirectory = it.IsDirectory,
+						size = it.Size,
+						lastWriteTime = it.LastWriteTime,
+						permissions = it.Permissions,
+						owner = it.Owner
+					});
+				}
+				PostToWeb(new { type = "sftpRemoteListResult", tabId, ok = true, path, items });
+			}
+			catch (Exception ex) { Log.Write($"[sftp] remote list failed: {ex.Message}"); PostToWeb(new { type = "sftpRemoteListResult", tabId, ok = false, message = ex.Message }); }
+		}
+		catch (Exception ex)
+		{
+			Log.Write($"[error] HandleSftpListRemote: {ex.Message}");
+		}
+	}
+
+	private void HandleSftpUpload(JsonElement root)
+	{
+		try
+		{
+			var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+			var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+			// localPath may be a string or array of strings
+			List<string> localPaths = new();
+			if (root.TryGetProperty("localPath", out var lp))
+			{
+				if (lp.ValueKind == JsonValueKind.String)
+				{
+					localPaths.Add(lp.GetString() ?? "");
+				}
+				else if (lp.ValueKind == JsonValueKind.Array)
+				{
+					foreach (var el in lp.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) localPaths.Add(el.GetString() ?? "");
+				}
+			}
+			var remoteDir = root.TryGetProperty("remoteDir", out var rd) ? rd.GetString() ?? "/" : "/";
+
+			var conn = _store.Get(connId);
+			if (conn == null) { PostToWeb(new { type = "sftpUploadResult", tabId, ok = false, message = "Connection not found" }); return; }
+
+			// Start async upload queue for this tabId with cancellation support
+			var localList = localPaths.ToArray();
+			var cts = new System.Threading.CancellationTokenSource();
+			lock (_sftpUploadLock)
+			{
+				if (_sftpUploadCts.ContainsKey(tabId))
+				{
+					try { _sftpUploadCts[tabId].Cancel(); } catch { }
+					_sftpUploadCts[tabId] = cts;
+				}
+				else
+				{
+					_sftpUploadCts[tabId] = cts;
+				}
+			}
+
+			PostToWeb(new { type = "sftpUploadStarted", tabId, files = localList, remoteDir });
+
+			_ = System.Threading.Tasks.Task.Run(() =>
+			{
+				var token = cts.Token;
+				try
+				{
+					foreach (var lpPath in localList)
+					{
+						if (token.IsCancellationRequested)
+						{
+							PostToWeb(new { type = "sftpUploadCanceled", tabId });
+							break;
+						}
+						try
+						{
+							if (Directory.Exists(lpPath)) { throw new InvalidOperationException($"Cannot upload a directory: {lpPath}"); }
+							if (!File.Exists(lpPath)) { throw new FileNotFoundException($"Local file not found: {lpPath}", lpPath); }
+
+							// Create SftpClient with correct auth type
+							using (var client = CreateSftpClientForConnection(conn))
+							{
+								client.Connect();
+
+								var remotePathFull = remoteDir.EndsWith("/") ? remoteDir + Path.GetFileName(lpPath) : remoteDir + "/" + Path.GetFileName(lpPath);
+
+								using var fs = File.OpenRead(lpPath);
+								long total = fs.Length;
+								ulong lastUploaded = 0;
+
+								Action<ulong> progress = (ulong uploaded) =>
+								{
+									lastUploaded = uploaded;
+									PostToWeb(new { type = "sftpUploadProgress", tabId, file = lpPath, uploaded = uploaded, total = total });
+									if (token.IsCancellationRequested)
+									{
+										try { client.Disconnect(); } catch { }
+									}
+								};
+
+								client.UploadFile(fs, remotePathFull, progress);
+
+								PostToWeb(new { type = "sftpUploadFinished", tabId, file = lpPath, remotePath = remotePathFull, ok = true });
+								// refresh remote folder
+								PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = remoteDir });
+							}
+						}
+						catch (Exception ex)
+						{
+							Log.Write($"[sftp] upload failed: {ex.Message}");
+							PostToWeb(new { type = "sftpUploadFinished", tabId, file = lpPath, ok = false, message = ex.Message });
+						}
+					}
+				}
+				catch (Exception ex)
+				{
+					Log.Write($"[sftp] upload queue failed: {ex.Message}");
+					PostToWeb(new { type = "sftpUploadFailed", tabId, message = ex.Message });
+				}
+				finally
+				{
+					lock (_sftpUploadLock) { if (_sftpUploadCts.ContainsKey(tabId)) _sftpUploadCts.Remove(tabId); }
+				}
+			});
+		}
+		catch (Exception ex)
+		{
+			Log.Write($"[error] HandleSftpUpload: {ex.Message}");
+		}
+	}
+
+	private void HandleSftpDownload(JsonElement root)
+	{
+		try
+		{
+			var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+			var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+			var remotePath = root.TryGetProperty("remotePath", out var rp) ? rp.GetString() ?? "" : "";
+			var localDir = root.TryGetProperty("localDir", out var ld) ? ld.GetString() ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+			// If no localDir specified, prefer Downloads folder
+			if (string.IsNullOrWhiteSpace(localDir))
+			{
+				localDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+				if (!Directory.Exists(localDir)) Directory.CreateDirectory(localDir);
+			}
+			var conn = _store.Get(connId);
+			if (conn == null) { PostToWeb(new { type = "sftpDownloadResult", tabId, ok = false, message = "Connection not found" }); return; }
+			try
+			{
+				var target = System.IO.Path.Combine(localDir, System.IO.Path.GetFileName(remotePath));
+				using var sftp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+				sftp.DownloadFile(remotePath, target);
+				PostToWeb(new { type = "sftpDownloadResult", tabId, ok = true, remotePath, localPath = target });
+				PostToWeb(new { type = "sftpRefreshLocal", tabId, path = localDir });
+			}
+			catch (Exception ex) { Log.Write($"[sftp] download failed: {ex.Message}"); PostToWeb(new { type = "sftpDownloadResult", tabId, ok = false, message = ex.Message }); }
+		}
+		catch (Exception ex)
+		{
+			Log.Write($"[error] HandleSftpDownload: {ex.Message}");
+		}
 	}
 
 	private void Spawn(string id, string command, string cwd, short cols, short rows)
 	{
 		var pty = new ConPty();
 		pty.Output += data => PostToWeb(new { type = "data", id, data });
-		pty.Exited += code =>
+		pty.RawOutput += bytes => AppendLog(id, bytes);
+        pty.Exited += code =>
 		{
-			Log.Write($"[{id}] processo encerrado, codigo={code}\n");
+			Log.Write($"[{id}] process ended, code={code}\n");
 			CloseLog(id);
 			PostToWeb(new { type = "exit", id, code });
 		};
@@ -370,7 +709,7 @@ public partial class MainWindow : Window
 		{
 			// Report detailed error to the frontend and console for diagnostics
 			var native = ex is Win32Exception w ? $" NativeErrorCode={w.NativeErrorCode}" : "";
-			var msg = $"Falha Iniciar processo: {ex.Message}{native} Command={command})";
+			var msg = $"Failed to start process: {ex.Message}{native} Command={command})";
 			PostToWeb(new { type = "error", message = msg });
 			const string esc = "\x1b";
 			try { PostToWeb(new { type = "data", id, data = $"\r\n{esc}[31m[error] {msg}{esc}[0m\r\n" }); } catch { }
@@ -406,6 +745,22 @@ public partial class MainWindow : Window
 		logDir = ResolveLogDir() 
 	});
 
+	private Renci.SshNet.SftpClient CreateSftpClientForConnection(Connection conn)
+	{
+		if (conn == null) throw new ArgumentNullException(nameof(conn));
+		if (conn.AuthMethod == "key")
+		{
+			// key path expected
+			if (string.IsNullOrWhiteSpace(conn.KeyPath)) throw new InvalidOperationException("KeyPath required for key auth");
+			var key = new Renci.SshNet.PrivateKeyFile(conn.KeyPath);
+			return new Renci.SshNet.SftpClient(conn.Host, conn.Port, conn.User, key);
+		}
+		else
+		{
+			return new Renci.SshNet.SftpClient(conn.Host, conn.Port, conn.User, conn.Password);
+		}
+	}
+
 	private void SavePrefs(JsonElement root)
 	{
 		if (root.TryGetProperty("theme", out var t) && t.ValueKind == JsonValueKind.String)
@@ -436,7 +791,8 @@ public partial class MainWindow : Window
 		var dir = string.IsNullOrWhiteSpace(dirOverrride) ? ResolveLogDir() : dirOverrride;
 		try {  Directory.CreateDirectory(dir); } 
 		catch (Exception ex) {
-			PostToWeb( new { type = "error", message = $"Failed to create log directory: {dir}. Error: {ex.Message}" });
+			Log.Write($"[error] Failed to create log directory: {dir}. Error: {ex.Message}");
+            PostToWeb( new { type = "error", message = $"Failed to create log directory: {dir}. Error: {ex.Message}" });
 			return;
         }
 		var tab = string.IsNullOrWhiteSpace(label) ? id : label;
@@ -445,7 +801,7 @@ public partial class MainWindow : Window
 		var stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
 		var path = Path.Combine(dir, $"{tab}_{stamp}.log");
 
-		FileStream fs;
+        FileStream fs;
 		try
 		{
 			fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
@@ -457,13 +813,13 @@ public partial class MainWindow : Window
         }
 
 		var separator = System.Text.Encoding.UTF8.GetBytes(
-			$"{Environment.NewLine}---- session {DateTime.Now:yyyy-MM-dd HH:mm:ss} ----${Environment.NewLine}");
+			$"{Environment.NewLine}---- session {DateTime.Now:yyyy-MM-dd HH:mm:ss} ----{Environment.NewLine}");
 		try { fs.Write(separator, 0, separator.Length); fs.Flush(); } catch { };
 
-		var entry = new SessionLog { Stream = fs, Path = path, Decoder = Encoding.UTF8.GetDecoder(), Buffer = new System.Text.StringBuilder(), Cursor = 0 };
+		var entry = new SessionLog { Stream = fs, Path = path, Decoder = Encoding.UTF8.GetDecoder(), Buffer = new System.Text.StringBuilder(), Cursor = 0, ConsecutiveBlankLines = 0 };
 		lock (_logLock) _logs[id] = entry;
 
-		pty.RawOutput += bytes => AppendLog(id, bytes);
+		//pty.RawOutput += bytes => AppendLog(id, bytes);
 
 		PostToWeb(new { type = "logStatus", id, active = true, path });
 		Log.Write($"[{id}] logging started -> {path}");
@@ -472,71 +828,215 @@ public partial class MainWindow : Window
 	private void AppendLog(string id, byte[] bytes)
 	{
 		SessionLog? entry;
-		lock ( _logLock) {  _logs.TryGetValue(id, out entry); }
-        if (entry == null) return;
-		try
-		{
-			// Decode bytes using the per-session Decoder to handle multibyte sequences split across chunks
-			int maxChars = entry.Decoder.GetCharCount(bytes, 0, bytes.Length);
-			char[] chars = new char[maxChars];
-			int charCount = entry.Decoder.GetChars(bytes, 0, bytes.Length, chars, 0);
-			string raw = new string(chars, 0, charCount);
-			// Remove ANSI escape sequences but keep CR/LF and backspace
-			string cleaned = _ansiRegex.Replace(raw, "");
-			cleaned = _ctrlRegex.Replace(cleaned, "");
+		lock (_logLock) { _logs.TryGetValue(id, out entry); }
+		ClipboardCapture? cap;
+		lock (_clipLock) { _clipCaptures.TryGetValue(id, out cap); }
 
-			// Process characters to handle CR (\r), LF (\n) and backspace (\b)
-			for (int i = 0; i < cleaned.Length; i++)
+		if (entry == null && cap == null) return;
+		if (entry != null) ProcessOutputToLog(entry, bytes);
+		if (cap != null) ProcessOutputToClipboard(cap, bytes);
+	}
+
+	private static void ProcessOutputToLog(SessionLog entry, byte[] bytes)
+	{
+		Log.Debug($"AppendLog id={entry.Path} bytes={bytes.Length}");
+        lock (entry)
+		{
+			try
 			{
-				char c = cleaned[i];
-				if (c == '\r')
+				// Decode bytes using the per-session Decoder to handle multibyte sequences split across chunks
+				int maxChars = entry.Decoder.GetCharCount(bytes, 0, bytes.Length);
+				char[] chars = new char[maxChars];
+				int charCount = entry.Decoder.GetChars(bytes, 0, bytes.Length, chars, 0);
+				string raw = new string(chars, 0, charCount);
+				// Remove ANSI escape sequences but keep CR/LF and backspace
+				string cleaned = _ansiRegex.Replace(raw, "");
+				cleaned = _ctrlRegex.Replace(cleaned, "");
+
+				// Process characters to handle CR (\r), LF (\n) and backspace (\b)
+				for (int i = 0; i < cleaned.Length; i++)
 				{
-					// carriage return -> move cursor to line start
-					entry.Cursor = 0;
-					continue;
-				}
-				else if (c == '\n')
-				{
-					// newline -> flush current buffer + newline to stream
-					var line = entry.Buffer.ToString();
-					var toWrite = line + Environment.NewLine;
-					var outBytes = Encoding.UTF8.GetBytes(toWrite);
-					lock (entry.Stream)
+					char c = cleaned[i];
+					if (c == '\r')
 					{
-						entry.Stream.Write(outBytes, 0, outBytes.Length);
-						entry.Stream.Flush();
+						// carriage return -> move cursor to line start
+						entry.Cursor = 0;
+						continue;
 					}
-					entry.Buffer.Clear();
-					entry.Cursor = 0;
-					continue;
-				}
-				else if (c == '\b')
-				{
-					// backspace -> remove previous char if any
-					if (entry.Cursor > 0)
+					else if (c == '\n')
 					{
-						entry.Buffer.Remove(entry.Cursor - 1, 1);
-						entry.Cursor--;
+						// newline -> flush current buffer + newline to stream
+						var line = entry.Buffer.ToString();
+						bool isBlank = string.IsNullOrWhiteSpace(line);
+						// Append non-blank lines always. For blank lines, append only once (avoid consecutive blanks).
+						if (!isBlank || entry.ConsecutiveBlankLines == 0)
+						{
+							var toWrite = line + Environment.NewLine;
+							var outBytes = Encoding.UTF8.GetBytes(toWrite);
+							lock (entry.Stream)
+							{
+								entry.Stream.Write(outBytes, 0, outBytes.Length);
+								entry.Stream.Flush();
+							}
+						}
+						entry.ConsecutiveBlankLines = isBlank ? 1 : 0;
+						entry.Buffer.Clear();
+						entry.Cursor = 0;
+						continue;
 					}
-					continue;
-				}
-				else
-				{
-					// printable char -> write/overwrite at cursor
-					if (entry.Cursor < entry.Buffer.Length)
+					else if (c == '\b')
 					{
-						entry.Buffer[entry.Cursor] = c;
+						// backspace -> remove previous char if any
+						if (entry.Cursor > 0)
+						{
+							entry.Buffer.Remove(entry.Cursor - 1, 1);
+							entry.Cursor--;
+						}
+						continue;
 					}
 					else
 					{
-						entry.Buffer.Append(c);
+						// printable char -> write/overwrite at cursor
+						if (entry.Cursor < entry.Buffer.Length)
+						{
+							entry.Buffer[entry.Cursor] = c;
+						}
+						else
+						{
+							entry.Buffer.Append(c);
+						}
+						entry.Cursor++;
 					}
-					entry.Cursor++;
 				}
 			}
+			catch { }
 		}
-		catch { };
     }
+
+	private static void ProcessOutputToClipboard(ClipboardCapture cap, byte[] bytes)
+	{
+		lock (cap)
+		{
+			try
+			{
+				int maxChars = cap.Decoder.GetCharCount(bytes, 0, bytes.Length);
+				char[] chars = new char[maxChars];
+				int charCount = cap.Decoder.GetChars(bytes, 0, bytes.Length, chars, 0);
+				string raw = new string(chars, 0, charCount);
+				string cleaned = _ansiRegex.Replace(raw, "");
+				cleaned = _ctrlRegex.Replace(cleaned, "");
+				for (int i = 0; i < cleaned.Length; i++)
+				{
+					char c = cleaned[i];
+					if (c == '\r')
+					{
+						cap.Cursor = 0;
+						continue;
+					}
+					else if (c == '\n')
+					{
+						var line = cap.LineBuffer.ToString();
+						bool isBlank = string.IsNullOrWhiteSpace(line);
+						// Append non-blank lines always. For blank lines, append only once to avoid consecutive blanks.
+						if (!isBlank || cap.ConsecutiveBlankLines == 0)
+						{
+							cap.FullText.AppendLine(line);
+						}
+						cap.ConsecutiveBlankLines = isBlank ? 1 : 0;
+						cap.LineBuffer.Clear();
+						cap.Cursor = 0;
+						continue;
+					}
+					else if (c == '\b')
+					{
+						if (cap.Cursor > 0)
+						{
+							cap.LineBuffer.Remove(cap.Cursor - 1, 1);
+							cap.Cursor--;
+						}
+						continue;
+					}
+					else
+					{
+						if (cap.Cursor < cap.LineBuffer.Length)
+						{
+							cap.LineBuffer[cap.Cursor] = c;
+						}
+						else
+						{
+							cap.LineBuffer.Append(c);
+						}
+						cap.Cursor++;
+					}
+				}
+			}
+			catch { }
+		}
+	}
+
+	private void StartClipCapture(string id)
+	{
+		StopClipCapture(id, copyToClipboard: false);
+		if (!_sessions.ContainsKey(id))
+        {
+			Log.Write($"[error] Session not found for clipboard capture: {id}");
+            PostToWeb(new { type = "error", message = $"Session not found: {id}" });
+            return;
+        }
+
+		var cap = new ClipboardCapture
+		{
+			Decoder = Encoding.UTF8.GetDecoder(),
+			FullText = new System.Text.StringBuilder(),
+			LineBuffer = new System.Text.StringBuilder(),
+			Cursor = 0,
+			ConsecutiveBlankLines = 0
+		};
+		lock (_clipLock) { _clipCaptures[id] = cap; }
+		PostToWeb(new { type = "clipCaptureStatus", id, active = true });
+		Log.Write($"[{id}] clipboard capture started");
+    }
+
+	private void StopClipCapture(string id, bool copyToClipboard = true)
+	{
+		ClipboardCapture? cap;
+		lock (_clipLock) { _clipCaptures.TryGetValue(id, out cap); if (cap !=null ) _clipCaptures.Remove(id); }
+		if (cap == null) return;
+
+		string capturedText = "";
+		int linesCount = 0;
+
+		lock( cap)
+		{
+			if(cap.LineBuffer.Length > 0)
+            {
+                cap.FullText.AppendLine(cap.LineBuffer.ToString());
+                cap.LineBuffer.Clear();
+                cap.Cursor = 0;
+            }
+			capturedText = cap.FullText.ToString().TrimEnd();
+		}
+		if (copyToClipboard && !string.IsNullOrEmpty(capturedText))
+		{
+			linesCount = capturedText.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None).Length;
+
+			try
+			{
+				Dispatcher.Invoke(() =>
+				{
+					try
+					{
+						Clipboard.SetDataObject(capturedText, true);
+					}
+					catch { }
+				});
+			}
+			catch { }
+		}
+
+		PostToWeb(new { type = "clipCaptureStatus", id, active = false, linesCount, charsCount = capturedText.Length });
+		Log.Write($"[{id}] clipboard capture stopped");
+	}
 
     private void CloseLog(string id)
 	{
@@ -600,6 +1100,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            Log.Write($"[error] Failed to open log directory: {ex.Message}");
             PostToWeb(new { type = "error", message = $"Failed to open log directory: {ex.Message}" });
         }
 	}
@@ -622,6 +1123,7 @@ public partial class MainWindow : Window
 			{
 				_prefs.Current.LogDir = selectedDir;
 				_prefs.Save();
+				Log.Write($"Log directory set to: {selectedDir}");
 				PostToWeb(new { type = "logDirPicked", path = selectedDir });
 				SendPrefs();
 			}
@@ -637,6 +1139,7 @@ public partial class MainWindow : Window
 		snip.Name = Str(s, "name");
 		snip.Commands = Str(s, "commands");
 		_snippets.Upsert(snip);
+		Log.Write($"Snippet saved: {snip.Name}");
 		SendSnippets();
 	}
 
@@ -662,16 +1165,16 @@ public partial class MainWindow : Window
 		_store.Upsert(conn);
 		PostToWeb(new { type = "connSaved", id = conn.Id });
 		SendConns();
+		Log.Write($"Connection saved: {conn.Name}");
 	}
 
 	private void PickKey()
 	{
 		var dlg = new Microsoft.Win32.OpenFileDialog
 		{
-			Title = "Selecione a chave Privada SSH",
-			Filter = "Chaves (id_*, *.pem, *.key)|id_*;*.pem;*.key|Todos os arquivos (*.*)|*.*",
-			InitialDirectory = Path.Combine(
-				Environment.GetEnvironmentVariable("USERPROFILE") ?? "", ".ssh"),
+			Title = "Select SSH Private Key",
+			Filter = "Keys (id_*, *.pem, *.key)|id_*;*.pem;*.key|All files (*.*)|*.*",
+			InitialDirectory = Path.Combine(Environment.GetEnvironmentVariable("USERPROFILE") ?? "", ".ssh"),
 		};
 		if (dlg.ShowDialog(this) == true)
 			PostToWeb(new { type = "keyPicked", path = dlg.FileName });

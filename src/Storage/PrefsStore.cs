@@ -7,14 +7,12 @@ public sealed class Prefs
 {
     public string Theme { get; set; } = "default";
     public double FontSize { get; set; } = 13.5;
-
     public string LogDir { get; set; } = "";
 }
 
 public sealed class PrefsStore
 {
-    private static readonly string Dir =
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SshManager");
+    private static readonly string Dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SshManager");
     private static readonly string FilePath = Path.Combine(Dir, "prefs.json");
 
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };

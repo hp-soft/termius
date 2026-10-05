@@ -27,11 +27,11 @@
                 </Grid.ColumnDefinitions>
             
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                    <Border Width="20" Height="20" CornerRadius="6" Background="#4c8bf5" Margin="0,0,8,0">
-                        <TextBlock Text="S" Foreground="White" FontWeight="Bold" FontSize="12"
+                    <Border Width="20" Height="20" CornerRadius="6" Background="#39d98a" Margin="0,0,8,0">
+                        <TextBlock Text="R" Foreground="White" FontWeight="Bold" FontSize="12"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <TextBlock Text="SSH Manager" Foreground="#d7deec" FontSize="12.5"
+                    <TextBlock Text="RTermius" Foreground="#d7deec" FontSize="12.5"
                             FontFamily="Segoe UI" VerticalAlignment="Center" />
                 </StackPanel>
 
