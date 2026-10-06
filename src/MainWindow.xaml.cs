@@ -1,16 +1,17 @@
+using Microsoft.Web.WebView2.Core;
+using SshManager.Pty;
+using SshManager.Storage;
 using System.ComponentModel;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
-using Microsoft.Web.WebView2.Core;
-using SshManager.Pty;
-using SshManager.Storage;
-using System.Text;
-using System.Text.RegularExpressions;
+using System.Xml.Linq;
 
 namespace SshManager;
 
@@ -239,12 +240,15 @@ public partial class MainWindow : Window
 			{
 				case "start": StartSession(id, root); break;
 				case "startSsh": StartSsh(id, root); break;
-			case "openSftp": OpenSftp(root); break;
-			case "sftpListLocal": HandleSftpListLocal(root); break;
-			case "sftpListRemote": HandleSftpListRemote(root); break;
-			case "sftpUpload": HandleSftpUpload(root); break;
-			case "sftpDownload": HandleSftpDownload(root); break;
-			case "sftpCancelUpload":
+				case "openSftp": OpenSftp(root); break;
+				case "sftpListLocal": HandleSftpListLocal(root); break;
+				case "sftpListRemote": HandleSftpListRemote(root); break;
+				case "sftpUpload": HandleSftpUpload(root); break;
+				case "sftpDownload": HandleSftpDownload(root); break;
+				case "sftpMkdir": HandleSftpMkdir(root); break;
+				case "sftpDelete": HandleSftpDelete(root); break;
+				case "sftpChmod": HandleSftpChmod(root); break;
+				case "sftpCancelUpload":
 				{
 					var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
 					lock (_sftpUploadLock)
@@ -497,7 +501,9 @@ public partial class MainWindow : Window
 			{
 				foreach (var fi in new DirectoryInfo(path).GetFileSystemInfos())
 				{
-					list.Add(new { name = fi.Name, fullName = fi.FullName, isDirectory = (fi.Attributes & FileAttributes.Directory) != 0 });
+					var isDir = (fi.Attributes & FileAttributes.Directory) != 0;
+					long sz = (!isDir && fi is FileInfo f) ? f.Length : 0;
+					list.Add(new { name = fi.Name, fullName = fi.FullName, isDirectory = isDir, size = sz, lastWriteTime = fi.LastWriteTime });
 				}
 			}
 			catch (Exception ex) { Log.Write($"[sftp] local list failed: {ex.Message}"); }
@@ -532,10 +538,11 @@ public partial class MainWindow : Window
 						size = it.Size,
 						lastWriteTime = it.LastWriteTime,
 						permissions = it.Permissions,
-						owner = it.Owner
+						owner = it.Owner,
+						group = it.Group
 					});
 				}
-				PostToWeb(new { type = "sftpRemoteListResult", tabId, ok = true, path, items });
+				PostToWeb(new { type = "sftpRemoteListResult", tabId, connId, ok = true, path, items });
 			}
 			catch (Exception ex) { Log.Write($"[sftp] remote list failed: {ex.Message}"); PostToWeb(new { type = "sftpRemoteListResult", tabId, ok = false, message = ex.Message }); }
 		}
@@ -604,33 +611,17 @@ public partial class MainWindow : Window
 							if (Directory.Exists(lpPath)) { throw new InvalidOperationException($"Cannot upload a directory: {lpPath}"); }
 							if (!File.Exists(lpPath)) { throw new FileNotFoundException($"Local file not found: {lpPath}", lpPath); }
 
-							// Create SftpClient with correct auth type
-							using (var client = CreateSftpClientForConnection(conn))
+							var remotePathFull = remoteDir.EndsWith("/") ? remoteDir + Path.GetFileName(lpPath) : remoteDir + "/" + Path.GetFileName(lpPath);
+
+							long total = new FileInfo(lpPath).Length;
+							PostToWeb(new { type = "sftpUploadProgress", tabId, file = lpPath, uploaded = 0L, total = total });
+							using (var client = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null,
+								conn.AuthMethod == "key" ? conn.KeyPath : null))
 							{
-								client.Connect();
-
-								var remotePathFull = remoteDir.EndsWith("/") ? remoteDir + Path.GetFileName(lpPath) : remoteDir + "/" + Path.GetFileName(lpPath);
-
-								using var fs = File.OpenRead(lpPath);
-								long total = fs.Length;
-								ulong lastUploaded = 0;
-
-								Action<ulong> progress = (ulong uploaded) =>
-								{
-									lastUploaded = uploaded;
-									PostToWeb(new { type = "sftpUploadProgress", tabId, file = lpPath, uploaded = uploaded, total = total });
-									if (token.IsCancellationRequested)
-									{
-										try { client.Disconnect(); } catch { }
-									}
-								};
-
-								client.UploadFile(fs, remotePathFull, progress);
-
-								PostToWeb(new { type = "sftpUploadFinished", tabId, file = lpPath, remotePath = remotePathFull, ok = true });
-								// refresh remote folder
-								PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = remoteDir });
+								client.UploadFile(lpPath, remoteDir);
 							}
+							PostToWeb(new { type = "sftpUploadProgress", tabId, file = lpPath, uploaded = total, total = total });
+
 						}
 						catch (Exception ex)
 						{
@@ -688,7 +679,91 @@ public partial class MainWindow : Window
 		}
 	}
 
-	private void Spawn(string id, string command, string cwd, short cols, short rows)
+	private SftpService NewSftp(Storage.Connection conn)
+		=> new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+
+	private void HandleSftpMkdir(JsonElement root)
+	{
+		var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+		var connId = root.TryGetProperty("connId", out var c) ? t.GetString() ?? "" : "";
+		var path = root.TryGetProperty("path", out var p) ? p.GetString() ?? "/" : "/";
+		var name = root.TryGetProperty("name", out var n) ? p.GetString() ?? "" : "";
+		var conn = _store.Get(connId);
+		if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "mkdir", tabId, ok = false, message = "Connection not found" }); return; }
+		if (string.IsNullOrWhiteSpace(name)) { PostToWeb(new { type = "sftpOpResult", op = "mkdir", tabId, ok = false, message = "Directory name is required" }); return; }
+		var full = (path.EndsWith("/") ? path : path + "/") + name;
+		try
+		{
+			using var sftp = NewSftp(conn);
+			sftp.CreateDirectory(full);
+			PostToWeb(new { type = "sftpOpResult", op = "mkdir", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path });
+        }
+		catch (Exception ex)
+		{
+			Log.Write($"[sftp] mkdir failed: {ex.Message}");
+			PostToWeb(new { type = "sftpOpResult", op = "mkdir", tabId, ok = false, message = ex.Message });
+		}
+    }
+
+	private void HandleSftpDelete(JsonElement root)
+	{
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? t.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+		var isDir = root.TryGetProperty("isDirectory", out var d) && d.ValueKind == JsonValueKind.True;
+		var conn = _store.Get(connId);
+		if( conn == null)
+		{
+			PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = "Connection not found" });
+			return;
+		}
+        if (string.IsNullOrWhiteSpace(remotePath)) { PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = "No path specified" }); return; }
+		try
+		{
+			using var sftp = NewSftp(conn);
+			if (isDir) sftp.RemoveDirectory(remotePath); else sftp.RemoveFile(remotePath);
+			PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = true });
+			PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+		}
+		catch (Exception ex)
+		{
+            Log.Write($"[sftp] delete failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpChmod(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? t.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+		var mode = root.TryGetProperty("mode", out var md) ? md.GetString() ?? "" : "";
+
+        var conn = _store.Get(connId);
+        if (conn == null)
+        {
+            PostToWeb(new { type = "sftpOpResult", op = "chmod", tabId, ok = false, message = "Connection not found" });
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(remotePath)) { PostToWeb(new { type = "sftpOpResult", op = "chmod", tabId, ok = false, message = "No path specified" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            sftp.ChangePermissions(remotePath, mode);
+            PostToWeb(new { type = "sftpOpResult", op = "chmod", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] chmod failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "chmod", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void Spawn(string id, string command, string cwd, short cols, short rows)
 	{
 		var pty = new ConPty();
 		pty.Output += data => PostToWeb(new { type = "data", id, data });
@@ -744,22 +819,6 @@ public partial class MainWindow : Window
 		fontSize = _prefs.Current.FontSize, 
 		logDir = ResolveLogDir() 
 	});
-
-	private Renci.SshNet.SftpClient CreateSftpClientForConnection(Connection conn)
-	{
-		if (conn == null) throw new ArgumentNullException(nameof(conn));
-		if (conn.AuthMethod == "key")
-		{
-			// key path expected
-			if (string.IsNullOrWhiteSpace(conn.KeyPath)) throw new InvalidOperationException("KeyPath required for key auth");
-			var key = new Renci.SshNet.PrivateKeyFile(conn.KeyPath);
-			return new Renci.SshNet.SftpClient(conn.Host, conn.Port, conn.User, key);
-		}
-		else
-		{
-			return new Renci.SshNet.SftpClient(conn.Host, conn.Port, conn.User, conn.Password);
-		}
-	}
 
 	private void SavePrefs(JsonElement root)
 	{

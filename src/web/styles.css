@@ -675,11 +675,51 @@ html, body {
 .sftp-item.selected { background: rgba(76,139,245,0.12); }
 .sftp-list { overflow:auto; padding:6px; border-radius:6px; background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent); border: 1px solid var(--border); display:flex; flex-direction: column; gap:4px; }
 
+.sftp-table {
+    width: 100%;
+    align-self: stretch;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 12px;
+    table-layout: fixed;
+}
+
+.sftp-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--panel);
+    text-align: left;
+    padding: 6px 8px;
+    color: var(--muted);
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    max-width: 0;
+}
+
+.sftp-table tbody tr.sftp-item {
+    display: table-row
+}
+
+.sftp-table tbody tr {
+    cursor: default;
+}
+
+.sftp-table tbody tr:hover { 
+    background: rgba(255,255,255,0.03);
+}
+
+.sftp-table tbody tr.selected {
+    background: rgba(76,139,245,0.12);
+}
+
 .sftp-header {
-    display:flex;
-    gap:6px;
-    align-items:center;
-    margin-bottom:8px;
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-bottom: 8px;
 }
 .sftp-header button {
     background: transparent;

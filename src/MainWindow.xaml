@@ -39,7 +39,7 @@
                 <StackPanel Grid.Column="2" Orientation="Horizontal" 
                             shell:WindowChrome.IsHitTestVisibleInChrome="True">
                         <Button x:Name="BtnMin" Click="OnMinimize" Style="{StaticResource CaptionBtn}" Content="&#xE921;" />
-                        <Button x:Name="BtnMax" Click="OnMaximize" Style="{StaticResource CaptionBtn}" Content="&#xE921;" />
+                        <Button x:Name="BtnMax" Click="OnMaximize" Style="{StaticResource CaptionBtn}" Content="&#xE922;" />
                         <Button x:Name="BtnClose" Click="OnClose" Style="{StaticResource CaptionBtnClose}" Content="&#xE8BB;" />
                 </StackPanel>
               </Grid>

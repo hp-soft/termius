@@ -52,12 +52,14 @@ function newSftpTab(conn, originTabId, remoteHome) {
     const content = document.createElement('div');
     content.className = 'sftp-content';
     content.innerHTML = '<div class="sftp-local" id="sftp-local-' + tabId + '">'
-        + '<div class="sftp-header"><button class="sftp-up-local">..</button><input class="sftp-path-local" id="sftp-path-local-' + tabId + '" value="" /></div>'
+        + '<div class="sftp-header"> <button class="sftp-up-local" title="Parent Directory">..</button><button class="sftp-refresh-local" title="Refresh">&#x21bb;</button>'
+        + '<input class="sftp-path-local" id="sftp-path-local-' + tabId + '" value="" /></div > '
         + '<div class="sftp-list" id="sftp-list-local-' + tabId + '"></div>'
         + '</div>'
         + '<div class="sftp-split"></div>'
         + '<div class="sftp-remote" id="sftp-remote-' + tabId + '">'
-        + '<div class="sftp-header"><button class="sftp-up-remote">..</button><input class="sftp-path-remote" id="sftp-path-remote-' + tabId + '" value="/" /></div>'
+        + '<div class="sftp-header"><button class="sftp-up-remote" title="Parent Directory">..</button><button class="sftp-refresh-remote" title="Refresh">&#x21bb;</button>'
+        + '<input class="sftp-path-remote" id="sftp-path-remote-' + tabId + '" value="/" /></div > '
         + '<div class="sftp-list" id="sftp-list-remote-' + tabId + '"></div>'
         + '</div>';
 
@@ -97,6 +99,8 @@ function newSftpTab(conn, originTabId, remoteHome) {
         post({ type: 'sftpListLocal', tabId: tabId, path: pathLocal.value });
     };
     pathLocal.onkeydown = (e) => { if (e.key === 'Enter') post({ type: 'sftpListLocal', tabId: tabId, path: pathLocal.value }); };
+    const refreshLocal = content.querySelector('.sftp-refresh-local');
+    if (refreshLocal) refreshLocal.onclick = () => post({ type: 'sftpListLocal', tabId: tabId, path: pathLocal.value });
 
     upRemote.onclick = () => {
         const cur = pathRemote.value || '/';
@@ -108,6 +112,8 @@ function newSftpTab(conn, originTabId, remoteHome) {
         post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value });
     };
     pathRemote.onkeydown = (e) => { if (e.key === 'Enter') post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value }); };
+    const refreshRemote = content.querySelector('.sftp-refresh-remote');
+    if (refreshRemote) refreshRemote.onclick = () => post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value });
 
     // simple drag handlers: local -> remote upload
     const localEl = content.querySelector('.sftp-local');
@@ -1185,6 +1191,150 @@ function showTabMenu(tabId, x, y) {
         document.addEventListener('keydown', onDocKeyDownForTabMenu, true);
     }, 0);
 }
+
+const sftpSort = {};
+
+function renderSftpTable(opts) {
+    const { listEl, items, columns, sortKey } = opts;
+    const state = sftpSort[sortKey] || (sftpSort[sortKey] = { col: opts.defaultCol || 'name', dir: 1 });
+
+    const col = columns.find(c => c.id === state.col) || columns[0];
+    const sorted = items.slice().sort((a, b) => {
+        if (!!a.isDirectory !== !!b.isDirectory) return a.isDirectory ? -1 : 1;
+        const va = col.sortVal(a), vb = col.sortVal(b);
+        let r;
+        if (typeof va === 'number' && typeof vb === 'number') r = va - vb;
+        else r = String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    const table = document.createElement('table');
+    table.className = 'sftp-table';
+    const thead = document.createElement('thead');
+    const htr = document.createElement('tr');
+    columns.forEach(c => {
+        const th = document.createElement('th');
+        th.textContent = c.label + (state.col === c.id ? (state.dir === 1 ? ' ' : ' ') : '');
+        if (c.width) th.style.width = c.width;
+        if (c.align) th.style.textAlign = c.align;
+        th.onclick = () => {
+            if (state.col === c.id) state.dir = -state.dir;
+            else { state.col = c.id; state.dir = 1; }
+            renderSftpTable(opts);
+        };
+        htr.appendChild(ht);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    sorted.forEach(it => {
+        const tr = document.createElement('tr');
+        tr.className = 'sftp-item';
+        tr.dataset.full = it.fullName;
+        tr.draggable = true;
+        columns.forEach(c => {
+            const td = document.createElement('td');
+            td.textContent = c.value(it);
+            if (c.align) td.style.textAlign = c.align;
+            if (c.mono) td.style.fontFamily = 'var(--mono)';
+            if (c.id === 'name' && it.isDirectory) td.style.fontWeight = '600';
+            tr.appendChild(td);
+        });
+        if (opts.onRow) opts.onRow(tr, it);
+        tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    listEl.innerHTML = '';
+    listEl.appendChild(table);
+}
+
+function wireSftpRow(tr, it) {
+    tr.addEventListener('dragstart', (e) => {
+        try {
+            const selected = tr.parentElement.querySelectorAll('.sftp-item.selected');
+            let paths = [];
+            if (selected && selected.length > 1) selected.forEach(s => paths.push(s.dataset.full));
+            else paths = [it.fullName];
+            e.dataTransfer.setData('application/json', JSON.stringify(paths));
+            e.dataTransfer.setData('text/plain', paths.join('\n'));
+        } catch (_) {} 
+    });
+    tr.addEventListener('click', (e) => {
+        const ctrl = e.ctrlKey || e.metaKey;
+        if (!ctrl) tr.parentElement.querySelectorAll('.sftp-item.selected').forEach(x => x.classList.remove('selected'));
+        tr.classList.toggle('selected');
+    });
+}
+
+const fmtSize = (it) => it.isDirectory ? '<dir>' : (it.size || 0).toLocaleString();
+const fmtTime = (it) => it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : '';
+
+function showSftpMenu(x,y,ctx) {
+    closeTabMenu();
+    const menu = document.createElement('div');
+    menu.className = 'tab-menu';
+    const it = ctx.item;
+    const items = [];
+    items.push({
+        label: 'New Directory...', actions: () => {
+            const name = prompt('New Directory name:', '');
+            if (name && name.trim())
+                post({ type: 'sftpMkdir', tabId: ctx.tabId, connId: ctx.connId, path: ctx.path, name: name.trim() });
+        }
+    });
+    if (it) {
+        items.push({ sep: true });
+        if (!it.isDirectory) {
+            items.push({ label: 'Download', action: () => post({ type: 'sftpDownload', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName }) })
+        }
+        items.push({
+            label: 'Change Permissions...', action: () => {
+                const current = octalFromPerms(it.permissions);
+                const mode = prompt('New permissions (octal, e.g. 644 or 755):', current);
+                if (mode && mode.trim())
+                    post({ type: 'sftpChmod', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, mode: mode.trim() });
+            }
+        });
+        items.push({ sep: true });
+        items.push({
+            label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
+                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? 'The directory must be empty.' : ''))) {
+                    post({ type: 'sftpDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+                }
+            }
+        });
+    }
+    items.forEach(mi => {
+        if (mi.sep) {
+            const sep = document.createElement('div');
+            sep.className = 'tab-menu-sep';
+            menu.appendChild(sep);
+            return;
+        }
+        const el = document.createElement('div');
+        el.className = 'tab-menu-item';
+        el.textContent = mi.label;
+        el.onclick = () => { closeTabMenu(); mi.action(); };
+        menu.appendChild(el);
+    });
+    document.body.appendChild(menu);
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = Math.min(x, window.innerWidth - w - 4) + 'px';
+    menu.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
+    tabMenuEl = menu;
+    setTimeout(() => {
+        document.addEventListener('mousedown', onDocMouseDownForTabMenu, true);
+        document.addEventListener('keydown', onDocKeyDownForTabMenu, true);
+    }, 0);
+}
+function octalFromPerms(perms) {
+    if (!perms || perms.length < 10) return '644';
+    const map = (s) => (s[0] !== '-' ? 4 : 0) + (s[1] !== '-' ? 2 : 0) + (s[2] !== '-' ? 1 : 0);
+    try {
+        return '' + map(perms.substr(1, 3)) + map(perms.substr(4, 3)) + map(perms.substr(7, 3));
+    } catch (_) { return '644'; }
+}
 function openGitBash() {
     const host = document.querySelector('.host.local');
     if (host) host.classList.add('connected');
@@ -1257,49 +1407,23 @@ if (bridge) {
             const pathEl = document.getElementById('sftp-path-local-' + m.tabId);
             if (pathEl && m.path !== undefined) pathEl.value = m.path || '';
             if (!listEl) return;
-            listEl.innerHTML = '';
-            (m.items || []).forEach(it => {
-                const row = document.createElement('div');
-                row.className = 'sftp-item';
-                row.dataset.full = it.fullName;
-                row.draggable = true;
-                row.addEventListener('dragstart', (e) => {
-                    try {
-                        // if multiple selected in this list, send JSON array of paths
-                        const parent = row.parentElement;
-                        const selected = parent.querySelectorAll('.sftp-item.selected');
-                        let paths = [];
-                        if (selected && selected.length > 1) {
-                            selected.forEach(s => paths.push(s.dataset.full));
-                        } else {
-                            paths = [it.fullName];
-                        }
-                        e.dataTransfer.setData('application/json', JSON.stringify(paths));
-                        e.dataTransfer.setData('text/plain', paths.join('\n'));
-                    } catch (_) { }
-                });
-                // selection handling
-                row.addEventListener('click', (e) => {
-                    const ctrl = e.ctrlKey || e.metaKey;
-                    const parent = row.parentElement;
-                    if (!ctrl) {
-                        parent.querySelectorAll('.sftp-item.selected').forEach(x => x.classList.remove('selected'));
-                    }
-                    row.classList.toggle('selected');
-                });
-                // build columns: icon, name, size, owner, mtime, perms (ls -la like)
-                const icon = document.createElement('div'); icon.textContent = it.isDirectory ? '📁' : '📄'; icon.style.width = '28px';
-                const name = document.createElement('div'); name.textContent = it.name; name.style.flex = '1';
-                const size = document.createElement('div'); size.textContent = it.isDirectory ? '<dir>' : (it.size || 0).toString(); size.style.width = '100px'; size.style.textAlign = 'right';
-                const owner = document.createElement('div'); owner.textContent = it.owner || ''; owner.style.width = '120px'; owner.style.opacity = '0.9';
-                const mtime = document.createElement('div'); mtime.textContent = it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : ''; mtime.style.width = '160px';
-                const perms = document.createElement('div'); perms.textContent = it.permissions || ''; perms.style.width = '120px'; perms.style.opacity = '0.8';
-                row.appendChild(icon); row.appendChild(name); row.appendChild(size); row.appendChild(owner); row.appendChild(mtime); row.appendChild(perms);
-                if (it.isDirectory) {
-                    name.style.fontWeight = '600';
-                    row.addEventListener('dblclick', () => { pathEl.value = it.fullName; post({ type: 'sftpListLocal', tabId: m.tabId, path: it.fullName }); });
+            renderSftpTable({
+                listEl,
+                items: m.items || [],
+                sortKey: 'local-' + m.tabid,
+                defaultCol: 'name',
+                columns: [ 
+                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '? ' : '? ') + it.name, sortVal: (it) => it.name },
+                    { id: 'size', label: 'Size', width: '110px', align: 'right', value: fmtSize, sortVal: (it) => it.size },
+                    { id: 'mtime', label: 'Modified', width: '170px', value: fmtTime, sortVal: (it) => it.lastWriteTime ? Date.parse(it.lastWriteTime) : 0 },
+                ],
+                onRow: (tr, it) => {
+                    wireSftpRow(tr, it);
+                    if (it.isDirectory) tr.addEventListener('dblclick', () => {
+                        pathEl.value = it.fullName;
+                        post({type: 'sftpListLocal', tabId: m.tabId, path: it.fullName });
+                    });
                 }
-                listEl.appendChild(row);
             });
         } else if (m.type === 'sftpRemoteListResult') {
             // { tabId, path, items }
@@ -1307,49 +1431,40 @@ if (bridge) {
             const pathEl = document.getElementById('sftp-path-remote-' + m.tabId);
             if (pathEl && m.path !== undefined) pathEl.value = m.path || '/';
             if (!listEl) return;
-            listEl.innerHTML = '';
-            (m.items || []).forEach(it => {
-                const row = document.createElement('div');
-                row.className = 'sftp-item';
-                row.dataset.full = it.fullName;
-                row.draggable = true;
-                row.addEventListener('dragstart', (e) => {
-                    try {
-                        // if multiple selected in this list, send JSON array of paths
-                        const parent = row.parentElement;
-                        const selected = parent.querySelectorAll('.sftp-item.selected');
-                        let paths = [];
-                        if (selected && selected.length > 1) {
-                            selected.forEach(s => paths.push(s.dataset.full));
-                        } else {
-                            paths = [it.fullName];
-                        }
-                        e.dataTransfer.setData('application/json', JSON.stringify(paths));
-                        e.dataTransfer.setData('text/plain', paths.join('\n'));
-                    } catch (_) {}
-                });
-                // selection handling
-                row.addEventListener('click', (e) => {
-                    const ctrl = e.ctrlKey || e.metaKey;
-                    const parent = row.parentElement;
-                    if (!ctrl) {
-                        parent.querySelectorAll('.sftp-item.selected').forEach(x => x.classList.remove('selected'));
-                    }
-                    row.classList.toggle('selected');
-                });
-                const name = document.createElement('div'); name.textContent = it.name; name.style.flex = '1';
-                const perms = document.createElement('div'); perms.textContent = it.permissions || ''; perms.style.width = '140px'; perms.style.opacity = '0.85'; perms.style.fontFamily = 'monospace';
-                const owner = document.createElement('div'); owner.textContent = it.owner || ''; owner.style.width = '120px'; owner.style.opacity = '0.9';
-                const group = document.createElement('div'); group.textContent = it.group || ''; group.style.width = '120px'; group.style.opacity = '0.9';
-                const size = document.createElement('div'); size.textContent = it.isDirectory ? '<dir>' : (it.size || 0).toString(); size.style.width = '100px'; size.style.textAlign = 'right';
-                const mtime = document.createElement('div'); mtime.textContent = it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : ''; mtime.style.width = '160px';
-                row.appendChild(perms); row.appendChild(owner); row.appendChild(group); row.appendChild(size); row.appendChild(mtime); row.appendChild(name);
-                if (it.isDirectory) {
-                    name.style.fontWeight = '600';
-                    row.addEventListener('dblclick', () => { pathEl.value = it.fullName; post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: it.fullName }); });
+            const curPathFor = () => (pathEl && pathEl.value) ? pathEl.value : (m.path || '/');
+            renderSftpTable({
+                listEl,
+                items: m.items || [],
+                sortKey: 'remote-' + m.tabid,
+                defaultCol: 'name',
+                columns: [
+                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '? ' : '? ') + it.name, sortVal: (it) => it.name },
+                    { id: 'size', label: 'Size', width: '100px', align: 'right', value: fmtSize, sortVal: (it) => it.size },
+                    { id: 'owner', label: 'Owner', width: '110px', value: (it) => it.owner || '', sortVal: (it) => it.owner || '' },
+                    { id: 'group', label: 'Group', width: '110px', value: (it) => it.group || '', sortVal: (it) => it.group || '' },
+                    { id: 'perms', label: 'Perms', width: '120px', mono: true, value: (it) => it.permissions || '', sortVal: (it) => it.permissions || '' },
+                    { id: 'mtime', label: 'Modified', width: '160px', value: fmtTime, sortVal: (it) => it.lastWriteTime ? Date.parse(it.lastWriteTime) : 0 },
+                ],
+                onRow: (tr, it) => {
+                    wireSftpRow(tr, it);
+                    if (it.isDirectory) tr.addEventListener('dblclick', () => {
+                        pathEl.value = it.fullName;
+                        post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: it.fullName });
+                    });
+                    tr.addEventListener('contextmenu', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: it, path: curPathFor() });
+                    });
+                    listEl.oncontextmenu = (e) => {
+                        if (e.target.closest('tr')) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: null, path: curPathFor() });
+                    };
                 }
-                listEl.appendChild(row);
             });
+          
         } else if (m.type === 'sftpUploadResult') {
             // legacy single-result fallback
             if (!m.ok) showToast('SFTP upload failed: ' + (m.message || 'error'), 4000);
@@ -1357,6 +1472,11 @@ if (bridge) {
         } else if (m.type === 'sftpDownloadResult') {
             if (!m.ok) showToast('SFTP download failed: ' + (m.message || 'error'), 4000);
             else showToast('Downloaded: ' + (m.localPath || ''), 3000);
+        } else if (m.type === 'sftpOpResult' ) {
+            const names = { mkdir: 'Create Directory', delete: 'Delete', chmod: 'Change Permissions' };
+            const op = names[m.op] || m.op;
+            if (!m.ok) showToast(op + ' failed: ' + (m.message || 'error'), 4000);
+            else showToast(op + 'succeeded', 2500);
         } else if (m.type === 'sftpUploadStarted') {
             // create UI entries for each file
             try {
