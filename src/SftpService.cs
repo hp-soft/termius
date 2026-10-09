@@ -19,10 +19,10 @@ namespace SshManager
         private readonly string _user;
         private readonly string? _password;
         private readonly string? _keyPath;
-        private readonly string? _sftpExe;
+        private readonly string _sftpExe;
 
         private static readonly Regex LsLine = new(
-            @"^([dlbcps\-][rwxstST\-]{9})[\+\.@\?\s+\d+\s+(.+?)\s+(\d+)\s+([A-Za-z]{3}\s+\d{1,2}\s+[\d:]+)\s+(.*)$",
+            @"^([dlbcps\-][rwxstST\-]{9})[\+\.@]?\s+\d+\s+(.+?)\s+(\d+)\s+([A-Za-z]{3}\s+\d{1,2}\s+[\d:]+)\s+(.*)$",
             RegexOptions.Compiled);
         
         public SftpService(string host, int port, string user, string? password = null, string? keyPath = null)
@@ -39,7 +39,7 @@ namespace SshManager
         public IEnumerable<SftpFileEntry> ListDirectory(string path)
         {
             var p = string.IsNullOrEmpty(path) ? "." : path;
-            var output = RunBatch($"ls -ls {Quote(p)}");
+            var output = RunBatch($"ls -la {Quote(p)}");
             var basePath = p.EndsWith("/") ? p : p + "/";
             var result = new List<SftpFileEntry>();
 
@@ -128,6 +128,15 @@ namespace SshManager
             RunBatch($"chmod {m} {Quote(remotePath)}");
         }
 
+        public void RenameRemote(string oldPath, string newPath)
+        {
+            RunBatch($"rename {Quote(oldPath)} {Quote(newPath)}");
+        }
+        public void GzipRemote(string remotePath)
+        {
+            RunSsh($"gzip -f -- {ShellQuote(remotePath)}");
+        }
+
         private string RunBatch(string commands)
         {
             var args = new StringBuilder();
@@ -178,9 +187,62 @@ namespace SshManager
             return stdout.ToString();
         }
 
+        private string RunSsh(string remoteCommand)
+        {
+            var ssh = GitBash.FindSsh() ??
+                throw new InvalidOperationException("ssh.exe not found");
+
+            var args = new StringBuilder();
+            args.Append($"-p {_port} -o StrictHostKeyCheckinf=accept-new -o BatchMode=no");
+            if (!string.IsNullOrWhiteSpace(_keyPath))
+                args.Append($" -i \"{_keyPath}\"");
+            args.Append($" {_user}@{_host} {remoteCommand}");
+
+            var psi = new ProcessStartInfo(ssh, args.ToString())
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            ApplyAskpass(psi);
+
+            using var proc = new Process { StartInfo = psi };
+            var stdout = new StringBuilder();
+            var stderr = new StringBuilder();
+            proc.OutputDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+            proc.ErrorDataReceived += (_, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+            proc.Start();
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+            proc.WaitForExit();
+
+            if (proc.ExitCode != 0)
+            {
+                var err = stderr.ToString().Trim();
+                throw new InvalidOperationException(
+                    string.IsNullOrEmpty(err) ? $"ssh exited code {proc.ExitCode}" : err);
+            }
+            return stdout.ToString();
+        }
+
+        private void ApplyAskpass(ProcessStartInfo psi)
+        {
+            if(string.IsNullOrWhiteSpace(_keyPath) && !string.IsNullOrEmpty(_password))
+            {
+                psi.Environment[AskpassModeEnv] = "1";
+                psi.Environment[AskpassPwEnv] = _password;
+                psi.Environment["SSH_ASKPASS"] = Environment.ProcessPath ?? _sftpExe;
+                psi.Environment["SSH_ASKPASS_REQUIRE"] = "force";
+                psi.Environment["DISPLAY"] = "localhost:0";
+                psi.Environment["SSH_ASKPASS_DISPLAY"] = "localhost:0";
+            }
+        }
         private static string Quote(string path) => "\"" + path.Replace("\"", "\\\"") + "\"";
 
         private static string QuoteLocal(string path) => Quote(path.Replace('\\', '/'));
+
+        private static string ShellQuote(string path) => "'" + path.Replace("'", "'\\''") + "'";
         public void Dispose()
         {
         }

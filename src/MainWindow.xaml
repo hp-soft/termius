@@ -5,7 +5,8 @@
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="SSH Manager" Height="680" Width="1080"
         Background="#0f1420" WindowStyle="None" ResizeMode="CanResize"
-        WindowStartupLocation="CenterScreen">
+        WindowStartupLocation="CenterScreen"
+        Icon="app.ico">
     
         <shell:WindowChrome.WindowChrome>
             <shell:WindowChrome CaptionHeight="36" ResizeBorderThickness="6"
@@ -28,10 +29,10 @@
             
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
                     <Border Width="20" Height="20" CornerRadius="6" Background="#39d98a" Margin="0,0,8,0">
-                        <TextBlock Text="R" Foreground="White" FontWeight="Bold" FontSize="12"
+                        <TextBlock Text="r" Foreground="White" FontWeight="Bold" FontSize="12"
                                    HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Border>
-                    <TextBlock Text="RTermius" Foreground="#d7deec" FontSize="12.5"
+                    <TextBlock Text="r-termius" Foreground="#d7deec" FontSize="12.5"
                             FontFamily="Segoe UI" VerticalAlignment="Center" />
                 </StackPanel>
 

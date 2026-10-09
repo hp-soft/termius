@@ -1200,11 +1200,20 @@ function renderSftpTable(opts) {
 
     const col = columns.find(c => c.id === state.col) || columns[0];
     const sorted = items.slice().sort((a, b) => {
-        if (!!a.isDirectory !== !!b.isDirectory) return a.isDirectory ? -1 : 1;
-        const va = col.sortVal(a), vb = col.sortVal(b);
-        let r;
-        if (typeof va === 'number' && typeof vb === 'number') r = va - vb;
-        else r = String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+        try {
+            if (!!a.isDirectory !== !!b.isDirectory) return a.isDirectory ? -1 : 1;
+            let va;
+            let vb;
+            try { va = col.sortVal ? col.sortVal(a) : (a[col.id] ?? ''); } catch { va = a[col.id] ?? ''; }
+            try { vb = col.sortVal ? col.sortVal(b) : (b[col.id] ?? ''); } catch { vb = b[col.id] ?? ''; }
+            let r;
+            if (typeof va === 'number' && typeof vb === 'number') r = va - vb;
+            else r = String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: 'base' });
+            return r * state.dir;
+        } catch (ex) {
+            console.warn('sftp sort error', ex);
+            return 0;
+        }
     });
 
     const table = document.createElement('table');
@@ -1213,7 +1222,7 @@ function renderSftpTable(opts) {
     const htr = document.createElement('tr');
     columns.forEach(c => {
         const th = document.createElement('th');
-        th.textContent = c.label + (state.col === c.id ? (state.dir === 1 ? ' ' : ' ') : '');
+        th.textContent = c.label + (state.col === c.id ? (state.dir === 1 ? '▲' : '▼') : '');
         if (c.width) th.style.width = c.width;
         if (c.align) th.style.textAlign = c.align;
         th.onclick = () => {
@@ -1221,7 +1230,7 @@ function renderSftpTable(opts) {
             else { state.col = c.id; state.dir = 1; }
             renderSftpTable(opts);
         };
-        htr.appendChild(ht);
+        htr.appendChild(th);
     });
     thead.appendChild(htr);
     table.appendChild(thead);
@@ -1234,7 +1243,15 @@ function renderSftpTable(opts) {
         tr.draggable = true;
         columns.forEach(c => {
             const td = document.createElement('td');
-            td.textContent = c.value(it);
+            let txt = '';
+            try {
+                const v = c.value ? c.value(it) : (it[c.id] ?? '');
+                txt = (v === null || v === undefined) ? '' : v.toString();
+            } catch (ex) {
+                console.warn('sftp render cell error', ex, c.id, it);
+                txt = '';
+            }
+            td.textContent = txt;
             if (c.align) td.style.textAlign = c.align;
             if (c.mono) td.style.fontFamily = 'var(--mono)';
             if (c.id === 'name' && it.isDirectory) td.style.fontWeight = '600';
@@ -1270,14 +1287,10 @@ function wireSftpRow(tr, it) {
 const fmtSize = (it) => it.isDirectory ? '<dir>' : (it.size || 0).toLocaleString();
 const fmtTime = (it) => it.lastWriteTime ? new Date(it.lastWriteTime).toLocaleString() : '';
 
-function showSftpMenu(x,y,ctx) {
-    closeTabMenu();
-    const menu = document.createElement('div');
-    menu.className = 'tab-menu';
-    const it = ctx.item;
+function buildRemoteMenu(ctx, it) {
     const items = [];
     items.push({
-        label: 'New Directory...', actions: () => {
+        label: 'New Directory...', action: () => {
             const name = prompt('New Directory name:', '');
             if (name && name.trim())
                 post({ type: 'sftpMkdir', tabId: ctx.tabId, connId: ctx.connId, path: ctx.path, name: name.trim() });
@@ -1287,6 +1300,21 @@ function showSftpMenu(x,y,ctx) {
         items.push({ sep: true });
         if (!it.isDirectory) {
             items.push({ label: 'Download', action: () => post({ type: 'sftpDownload', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName }) })
+        }
+        items.push({
+            label: 'Rename file...', action: () => {
+                const newName = prompt('New name:', it.name);
+                if (newName && newName.trim() && newName.trim() != it.name)
+                    post({ type: 'sftpRenameRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
+            }
+        });
+        if (!it.isDirectory) {
+            items.push({
+                label: 'Zip file (gzip)', action: () => {
+                    if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
+                        post({ type: 'sftpZipRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                }
+            });
         }
         items.push({
             label: 'Change Permissions...', action: () => {
@@ -1299,12 +1327,59 @@ function showSftpMenu(x,y,ctx) {
         items.push({ sep: true });
         items.push({
             label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
-                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? 'The directory must be empty.' : ''))) {
+                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
                     post({ type: 'sftpDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
                 }
             }
         });
     }
+    return items;
+}
+function buildLocalMenu(ctx, it) {
+    const items = [];
+    items.push({
+        label: 'New Directory...', action: () => {
+            const name = prompt('New Directory name:', '');
+            if (name && name.trim())
+                post({ type: 'localMkdir', tabId: ctx.tabId, connId: ctx.connId, path: ctx.path, name: name.trim() });
+        }
+    });
+    if (it) {
+        items.push({ sep: true });
+        items.push({
+            label: 'Rename file...', action: () => {
+                const newName = prompt('New name:', it.name);
+                if (newName && newName.trim() && newName.trim() != it.name)
+                    post({ type: 'localRename', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
+            }
+        });
+        if (!it.isDirectory) {
+            items.push({
+                label: 'Zip file (gzip)', action: () => {
+                    if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
+                        post({ type: 'localZip', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                }
+            });
+        }
+        items.push({ sep: true });
+        items.push({
+            label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
+                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
+                    post({ type: 'localDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+                }
+            }
+        });
+    }
+    return items;
+}
+
+function showSftpMenu(x, y, ctx) {
+    closeTabMenu();
+    const menu = document.createElement('div');
+    menu.className = 'tab-menu';
+    const it = ctx.item;
+    const items = ctx.local ? buildLocalMenu(ctx, it) : buildRemoteMenu(ctx, it);
+
     items.forEach(mi => {
         if (mi.sep) {
             const sep = document.createElement('div');
@@ -1407,14 +1482,15 @@ if (bridge) {
             const pathEl = document.getElementById('sftp-path-local-' + m.tabId);
             if (pathEl && m.path !== undefined) pathEl.value = m.path || '';
             if (!listEl) return;
+            const curLocalPathFor = () => (pathEl && pathEl.value) ? pathEl.value : (m.path || '');
             renderSftpTable({
                 listEl,
                 items: m.items || [],
-                sortKey: 'local-' + m.tabid,
+                sortKey: 'local-' + m.tabId,
                 defaultCol: 'name',
                 columns: [ 
-                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '? ' : '? ') + it.name, sortVal: (it) => it.name },
-                    { id: 'size', label: 'Size', width: '110px', align: 'right', value: fmtSize, sortVal: (it) => it.size },
+                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '📂' : '📄 ') + it.name, sortVal: (it) => it.name },
+                    { id: 'size', label: 'Size', width: '110px', align: 'right', value: fmtSize, sortVal: (it) => it.size || 0},
                     { id: 'mtime', label: 'Modified', width: '170px', value: fmtTime, sortVal: (it) => it.lastWriteTime ? Date.parse(it.lastWriteTime) : 0 },
                 ],
                 onRow: (tr, it) => {
@@ -1423,8 +1499,20 @@ if (bridge) {
                         pathEl.value = it.fullName;
                         post({type: 'sftpListLocal', tabId: m.tabId, path: it.fullName });
                     });
+                    tr.addEventListener('contextmenu', (e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, item: it, path: curLocalPathFor(), local: true });
+                    });
                 }
             });
+            listEl.oncontextmenu = (e) => {
+                if (e.target.closest('tr')) return;
+                e.preventDefault();
+                e.stopPropagation();
+                // no specific item when clicking empty area
+                showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, item: null, path: curLocalPathFor(), local: true });
+            };
         } else if (m.type === 'sftpRemoteListResult') {
             // { tabId, path, items }
             const listEl = document.getElementById('sftp-list-remote-' + m.tabId);
@@ -1435,10 +1523,10 @@ if (bridge) {
             renderSftpTable({
                 listEl,
                 items: m.items || [],
-                sortKey: 'remote-' + m.tabid,
+                sortKey: 'remote-' + m.tabId,
                 defaultCol: 'name',
                 columns: [
-                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '? ' : '? ') + it.name, sortVal: (it) => it.name },
+                { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '📂' : '📄 ') + it.name, sortVal: (it) => it.name },
                     { id: 'size', label: 'Size', width: '100px', align: 'right', value: fmtSize, sortVal: (it) => it.size },
                     { id: 'owner', label: 'Owner', width: '110px', value: (it) => it.owner || '', sortVal: (it) => it.owner || '' },
                     { id: 'group', label: 'Group', width: '110px', value: (it) => it.group || '', sortVal: (it) => it.group || '' },
@@ -1456,15 +1544,14 @@ if (bridge) {
                         e.stopPropagation();
                         showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: it, path: curPathFor() });
                     });
-                    listEl.oncontextmenu = (e) => {
-                        if (e.target.closest('tr')) return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: null, path: curPathFor() });
-                    };
                 }
             });
-          
+            listEl.oncontextmenu = (e) => {
+                if (e.target.closest('tr')) return;
+                e.preventDefault();
+                e.stopPropagation();
+                showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: null, path: curPathFor() });
+            };          
         } else if (m.type === 'sftpUploadResult') {
             // legacy single-result fallback
             if (!m.ok) showToast('SFTP upload failed: ' + (m.message || 'error'), 4000);
@@ -1473,7 +1560,7 @@ if (bridge) {
             if (!m.ok) showToast('SFTP download failed: ' + (m.message || 'error'), 4000);
             else showToast('Downloaded: ' + (m.localPath || ''), 3000);
         } else if (m.type === 'sftpOpResult' ) {
-            const names = { mkdir: 'Create Directory', delete: 'Delete', chmod: 'Change Permissions' };
+            const names = { mkdir: 'Create Directory', delete: 'Delete', chmod: 'Change Permissions', rename: 'Rename', zip: 'Compress' };
             const op = names[m.op] || m.op;
             if (!m.ok) showToast(op + ' failed: ' + (m.message || 'error'), 4000);
             else showToast(op + 'succeeded', 2500);

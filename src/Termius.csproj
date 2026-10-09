@@ -8,7 +8,7 @@
 	<UseWPF>true</UseWPF>
 	<AssemblyName>SshManager</AssemblyName>
 	<RootNamespace>SshManager</RootNamespace>
-	<ApplicationIcon></ApplicationIcon>
+	<ApplicationIcon>app.ico</ApplicationIcon>
 	<Platforms>AnyCPU;x64</Platforms>
 	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	<LangVersion>latest</LangVersion>
@@ -16,6 +16,10 @@
 	<ApplicationManifest>app.manifest</ApplicationManifest>
 	</PropertyGroup>
 
+	<ItemGroup>
+		<Resource Include="app.ico" />
+	</ItemGroup>
+	
 	<ItemGroup>
 		<Reference Include="Microsoft.Web.WebView2.Core">
 			<HintPath>libs\Microsoft.Web.WebView2.Core.dll</HintPath>

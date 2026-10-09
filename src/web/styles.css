@@ -696,7 +696,24 @@ html, body {
     cursor: pointer;
     user-select: none;
     white-space: nowrap;
-    max-width: 0;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Ensure table cells don't overflow and show ellipsis when too long */
+.sftp-table tbody td {
+    padding: 6px 8px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* allow header cells to size according to provided widths */
+.sftp-table thead th {
+    max-width: none;
+}
+
+.sftp-table thead th:hover {
+    color: var(--txt);
 }
 
 .sftp-table tbody tr.sftp-item {
@@ -707,7 +724,7 @@ html, body {
     cursor: default;
 }
 
-.sftp-table tbody tr:hover { 
+.sftp-table tbody tr:hover {
     background: rgba(255,255,255,0.03);
 }
 
@@ -721,6 +738,7 @@ html, body {
     align-items: center;
     margin-bottom: 8px;
 }
+
 .sftp-header button {
     background: transparent;
     border: 1px solid var(--border);
@@ -729,11 +747,12 @@ html, body {
     border-radius: 6px;
     cursor: pointer;
 }
+
 .sftp-header input {
-    flex:1;
-    padding:6px 8px;
-    border-radius:6px;
-    border:1px solid var(--border);
+    flex: 1;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
     background: transparent;
     color: var(--txt);
     font-family: var(--mono);
