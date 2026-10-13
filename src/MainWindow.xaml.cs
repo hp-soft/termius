@@ -2,6 +2,7 @@ using Microsoft.Web.WebView2.Core;
 using SshManager.Pty;
 using SshManager.Storage;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -246,13 +247,34 @@ public partial class MainWindow : Window
                 case "sftpDownload": HandleSftpDownload(root); break;
                 case "sftpMkdir": HandleSftpMkdir(root); break;
                 case "sftpDelete": HandleSftpDelete(root); break;
+                case "sftpDeleteMultiple": HandleSftpDeleteMultiple(root); break;
                 case "sftpChmod": HandleSftpChmod(root); break;
                 case "sftpRenameRemote": HandleSftpRenameRemote(root); break;
                 case "sftpZipRemote": HandleSftpZipRemote(root); break;
+                case "sftpZipRemoteMultiple": HandleSftpZipRemoteMultiple(root); break;
+                case "sftpUnzipRemote": HandleSftpUnzipRemote(root); break;
+                case "sftpUnzipRemoteMultiple": HandleSftpUnzipRemoteMultiple(root); break;
+                case "sftpDuplicateRemote": HandleSftpDuplicateRemote(root); break;
+                case "sftpBackupRemote": HandleSftpBackupRemote(root); break;
+                case "sftpTarZipRemote": HandleSftpTarZipRemote(root); break;
+                case "sftpUntarUnzipRemote": HandleSftpUntarUnzipRemote(root); break;
                 case "localDelete": HandleLocalDelete(root); break;
+                case "localDeleteMultiple": HandleLocalDeleteMultiple(root); break;
                 case "localRename": HandleLocalRename(root); break;
                 case "localMkdir": HandleLocalMkdir(root); break;
                 case "localZip": HandleLocalZip(root); break;
+                case "localZipMultiple": HandleLocalZipMultiple(root); break;
+                case "localUnzip": HandleLocalUnzip(root); break;
+                case "localUnzipMultiple": HandleLocalUnzipMultiple(root); break;
+                case "localDuplicate": HandleLocalDuplicate(root); break;
+                case "localBackup": HandleLocalBackup(root); break;
+                case "localUpload": HandleLocalUpload(root); break;
+                case "localTarZip": HandleLocalTarZip(root); break;
+                case "localUntarUnzip": HandleLocalUntarUnzip(root); break;
+                case "localPreview": HandleLocalPreview(root); break;
+                case "localDiskInfo": HandleLocalDiskInfo(root); break;
+                case "sftpPreview": HandleSftpPreview(root); break;
+                case "sftpDiskInfo": HandleSftpDiskInfo(root); break;
                 case "sftpCancelUpload":
                     {
                         var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
@@ -636,8 +658,7 @@ public partial class MainWindow : Window
                             {
                                 client.UploadFile(lpPath, remoteDir);
                             }
-                            PostToWeb(new { type = "sftpUploadFinished", tabId, file = lpPath, remotePath = remotePathFull, ok = true });
-                            PostToWeb(new { type = "sftpUploadProgress", tabId, connId, path = remoteDir });
+                            PostToWeb(new { type = "sftpUploadFinished", tabId, file = lpPath, remotePath = remotePathFull, ok = true, connId, path = remoteDir });
                         }
                         catch (Exception ex)
                         {
@@ -679,15 +700,26 @@ public partial class MainWindow : Window
             }
             var conn = _store.Get(connId);
             if (conn == null) { PostToWeb(new { type = "sftpDownloadResult", tabId, ok = false, message = "Connection not found" }); return; }
-            try
+
+            _ = System.Threading.Tasks.Task.Run(() =>
             {
-                var target = System.IO.Path.Combine(localDir, System.IO.Path.GetFileName(remotePath));
-                using var sftp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
-                sftp.DownloadFile(remotePath, target);
-                PostToWeb(new { type = "sftpDownloadResult", tabId, ok = true, remotePath, localPath = target });
-                PostToWeb(new { type = "sftpRefreshLocal", tabId, path = localDir });
-            }
-            catch (Exception ex) { Log.Write($"[sftp] download failed: {ex.Message}"); PostToWeb(new { type = "sftpDownloadResult", tabId, ok = false, message = ex.Message }); }
+                try
+                {
+                    var target = System.IO.Path.Combine(localDir, System.IO.Path.GetFileName(remotePath));
+                    PostToWeb(new { type = "sftpDownloadStarted", tabId, files = new[] { remotePath }, localDir });
+                    using var sftp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+                    sftp.DownloadFile(remotePath, target);
+                    PostToWeb(new { type = "sftpDownloadFinished", tabId, ok = true, file = remotePath, localPath = target });
+                    PostToWeb(new { type = "sftpDownloadResult", tabId, ok = true, remotePath, localPath = target });
+                    PostToWeb(new { type = "sftpRefreshLocal", tabId, path = localDir });
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"[sftp] download failed: {ex.Message}");
+                    PostToWeb(new { type = "sftpDownloadFailed", tabId, ok = false, file = remotePath, message = ex.Message });
+                    PostToWeb(new { type = "sftpDownloadResult", tabId, ok = false, message = ex.Message });
+                }
+            });
         }
         catch (Exception ex)
         {
@@ -874,8 +906,8 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            Log.Write($"[local] delete failed: {ex.Message}");
-            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = ex.Message });
+            Log.Write($"[local] rename failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "rename", tabId, ok = false, message = ex.Message });
         }
     }
 
@@ -908,12 +940,25 @@ public partial class MainWindow : Window
             if (string.IsNullOrWhiteSpace(fullName)) throw new ArgumentException("No path specified");
             if (!File.Exists(fullName)) throw new InvalidOperationException("Only files can be gzipped");
             var dest = fullName + ".gz";
-            using (var src = File.OpenRead(fullName))
+
+            // Read all bytes first to ensure we have the complete file
+            var fileBytes = File.ReadAllBytes(fullName);
+
+            // Compress to destination
             using (var outfs = File.Create(dest))
             using (var gz = new System.IO.Compression.GZipStream(outfs, System.IO.Compression.CompressionLevel.Optimal))
             {
-                src.CopyTo(gz);
+                gz.Write(fileBytes, 0, fileBytes.Length);
             }
+
+            // Verify destination was created and has content
+            if (!File.Exists(dest) || new FileInfo(dest).Length == 0)
+            {
+                throw new InvalidOperationException("Compression failed - destination file is empty or missing");
+            }
+
+            // Delete original file after successful compression
+            File.Delete(fullName);
             PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = true });
             PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
         }
@@ -921,6 +966,727 @@ public partial class MainWindow : Window
         {
             Log.Write($"[local] gzip failed: {ex.Message}");
             PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalUnzip(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var fullName = root.TryGetProperty("fullName", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(fullName)) throw new ArgumentException("No path specified");
+            if (!File.Exists(fullName)) throw new InvalidOperationException("File not found");
+            if (!fullName.EndsWith(".gz")) throw new InvalidOperationException("Only .gz files can be unzipped");
+
+            var dest = fullName.Substring(0, fullName.Length - 3);
+            var fileBytes = File.ReadAllBytes(fullName);
+            using (var src = new System.IO.MemoryStream(fileBytes))
+            using (var gz = new System.IO.Compression.GZipStream(src, System.IO.Compression.CompressionMode.Decompress))
+            using (var outfs = File.Create(dest))
+            {
+                gz.CopyTo(outfs);
+            }
+
+            if (!File.Exists(dest) || new FileInfo(dest).Length == 0)
+            {
+                throw new InvalidOperationException("Decompression failed");
+            }
+
+            File.Delete(fullName);
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] unzip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalDuplicate(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var fullName = root.TryGetProperty("fullName", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var newName = root.TryGetProperty("newName", out var nn) ? nn.GetString() ?? "" : "";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(fullName)) throw new ArgumentException("No path specified");
+            if (string.IsNullOrWhiteSpace(newName)) throw new ArgumentException("New name is required");
+            var dir = Path.GetDirectoryName(fullName) ?? parentPath;
+            var dest = Path.Combine(dir, newName);
+            if (File.Exists(fullName)) File.Copy(fullName, dest, true);
+            else if (Directory.Exists(fullName)) DirectoryCopy(fullName, dest, true);
+            else throw new FileNotFoundException("Source not found", fullName);
+            PostToWeb(new { type = "sftpOpResult", op = "duplicate", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] duplicate failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "duplicate", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalUpload(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var localPath = root.TryGetProperty("localPath", out var lp) ? lp.GetString() ?? "" : "";
+        var remoteDir = root.TryGetProperty("remoteDir", out var rd) ? rd.GetString() ?? "/" : "/";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(localPath)) throw new ArgumentException("No local path specified");
+            var conn = _store.Get(connId);
+            if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "upload", tabId, ok = false, message = "Connection not found" }); return; }
+
+            _ = System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    PostToWeb(new { type = "sftpUploadStarted", tabId, files = new[] { localPath }, remoteDir });
+                    using var sftp = new SftpService(conn.Host, conn.Port, conn.User, conn.AuthMethod == "password" ? conn.Password : null, conn.AuthMethod == "key" ? conn.KeyPath : null);
+                    sftp.UploadFile(localPath, remoteDir);
+                    PostToWeb(new { type = "sftpUploadFinished", tabId, file = localPath, ok = true });
+                    PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = remoteDir });
+                }
+                catch (Exception ex)
+                {
+                    Log.Write($"[local] upload failed: {ex.Message}");
+                    PostToWeb(new { type = "sftpUploadFinished", tabId, file = localPath, ok = false, message = ex.Message });
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[error] HandleLocalUpload: {ex.Message}");
+        }
+    }
+
+    private void HandleLocalBackup(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var fullName = root.TryGetProperty("fullName", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        try
+        {
+            if (string.IsNullOrWhiteSpace(fullName)) throw new ArgumentException("No path specified");
+            if (!File.Exists(fullName)) throw new InvalidOperationException("File not found");
+
+            var fileName = Path.GetFileName(fullName);
+            string backupName;
+            if (fileName.EndsWith(".tar.gz"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 7) + ".bak.tar.gz";
+            }
+            else if (fileName.EndsWith(".gz"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 3) + ".bak.gz";
+            }
+            else if (fileName.EndsWith(".tar"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 4) + ".bak.tar";
+            }
+            else
+            {
+                backupName = fileName + ".bak";
+            }
+
+            var dir = Path.GetDirectoryName(fullName) ?? parentPath;
+            var dest = Path.Combine(dir, backupName);
+            File.Copy(fullName, dest, true);
+            PostToWeb(new { type = "sftpOpResult", op = "backup", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] backup failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "backup", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalDeleteMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        try
+        {
+            foreach (var path in paths)
+            {
+                if (Directory.Exists(path)) Directory.Delete(path, true);
+                else if (File.Exists(path)) File.Delete(path);
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] delete multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalZipMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        try
+        {
+            foreach (var path in paths)
+            {
+                if (!File.Exists(path)) continue;
+                var dest = path + ".gz";
+                var fileBytes = File.ReadAllBytes(path);
+                using (var outfs = File.Create(dest))
+                using (var gz = new System.IO.Compression.GZipStream(outfs, System.IO.Compression.CompressionLevel.Optimal))
+                {
+                    gz.Write(fileBytes, 0, fileBytes.Length);
+                }
+                if (File.Exists(dest) && new FileInfo(dest).Length > 0)
+                {
+                    File.Delete(path);
+                }
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] zip multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalUnzipMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        try
+        {
+            foreach (var path in paths)
+            {
+                if (!File.Exists(path) || !path.EndsWith(".gz")) continue;
+                var dest = path.Substring(0, path.Length - 3);
+                var fileBytes = File.ReadAllBytes(path);
+                using (var src = new System.IO.MemoryStream(fileBytes))
+                using (var gz = new System.IO.Compression.GZipStream(src, System.IO.Compression.CompressionMode.Decompress))
+                using (var outfs = File.Create(dest))
+                {
+                    gz.CopyTo(outfs);
+                }
+                if (File.Exists(dest) && new FileInfo(dest).Length > 0)
+                {
+                    File.Delete(path);
+                }
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] unzip multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpUnzipRemote(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var rp) ? rp.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            sftp.UnzipRemote(remotePath);
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] unzip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpDuplicateRemote(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var rp) ? rp.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var newName = root.TryGetProperty("newName", out var nn) ? nn.GetString() ?? "" : "";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "duplicate", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            var dir = parentPath.EndsWith("/") ? parentPath : parentPath + "/";
+            var dest = dir + newName;
+            using var sftp = NewSftp(conn);
+            sftp.DuplicateRemote(remotePath, dest);
+            PostToWeb(new { type = "sftpOpResult", op = "duplicate", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] duplicate failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "duplicate", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpBackupRemote(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var rp) ? rp.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "backup", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            var fileName = Path.GetFileName(remotePath);
+            string backupName;
+            if (fileName.EndsWith(".tar.gz"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 7) + ".bak.tar.gz";
+            }
+            else if (fileName.EndsWith(".gz"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 3) + ".bak.gz";
+            }
+            else if (fileName.EndsWith(".tar"))
+            {
+                backupName = fileName.Substring(0, fileName.Length - 4) + ".bak.tar";
+            }
+            else
+            {
+                backupName = fileName + ".bak";
+            }
+            var dir = parentPath.EndsWith("/") ? parentPath : parentPath + "/";
+            var dest = dir + backupName;
+            using var sftp = NewSftp(conn);
+            sftp.BackupRemote(remotePath, dest);
+            PostToWeb(new { type = "sftpOpResult", op = "backup", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] backup failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "backup", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpZipRemoteMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            foreach (var path in paths)
+            {
+                sftp.GzipRemote(path);
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] zip multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "zip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpUnzipRemoteMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            foreach (var path in paths)
+            {
+                sftp.UnzipRemote(path);
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] unzip multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "unzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpTarZipRemote(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var archiveName = root.TryGetProperty("archiveName", out var an) ? an.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            sftp.TarZipRemote(archiveName, paths.ToArray(), parentPath);
+            PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] tar+zip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleSftpUntarUnzipRemote(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var archivePath = root.TryGetProperty("archivePath", out var ap) ? ap.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "untarunzip", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            sftp.UntarUnzipRemote(archivePath, parentPath);
+            PostToWeb(new { type = "sftpOpResult", op = "untarunzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] untar+unzip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "untarunzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalTarZip(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var archiveName = root.TryGetProperty("archiveName", out var an) ? an.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        try
+        {
+            var archivePath = Path.Combine(parentPath, archiveName);
+            var bash = GitBash.Find() ?? throw new InvalidOperationException("bash not found");
+            // Extract just the file names (not full paths) since we're cd'ing to the directory
+            var fileNames = paths.Select(p => Path.GetFileName(p)).ToArray();
+            // Quote each filename properly for bash (handle spaces and special chars)
+            var filesArgs = string.Join(" ", fileNames.Select(f => ShellQuoteForBash(f)));
+            var args = $"-c \"cd '{parentPath}' && tar -c -f - {filesArgs} | gzip > '{archiveName}'\"";
+
+            var psi = new ProcessStartInfo(bash, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = new Process { StartInfo = psi };
+            proc.Start();
+            proc.WaitForExit();
+            if (proc.ExitCode != 0)
+            {
+                var err = proc.StandardError.ReadToEnd();
+                throw new InvalidOperationException($"tar+zip failed: {err}");
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] tar+zip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private static string ShellQuoteForBash(string path) => "'" + path.Replace("'", "'\\''") + "'";
+
+    private void HandleLocalUntarUnzip(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var fullName = root.TryGetProperty("fullName", out var p) ? p.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        try
+        {
+            if (!File.Exists(fullName)) throw new InvalidOperationException("File not found");
+            var bash = GitBash.Find() ?? throw new InvalidOperationException("bash not found");
+            var args = $"-c \"cd '{parentPath}' && gzip -d -c '{fullName}' | tar -x -f -\"";
+
+            var psi = new ProcessStartInfo(bash, args)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            using var proc = new Process { StartInfo = psi };
+            proc.Start();
+            proc.WaitForExit();
+            if (proc.ExitCode != 0)
+            {
+                var err = proc.StandardError.ReadToEnd();
+                throw new InvalidOperationException($"untar+unzip failed: {err}");
+            }
+            PostToWeb(new { type = "sftpOpResult", op = "untarunzip", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] untar+unzip failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "untarunzip", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void HandleLocalPreview(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var fullName = root.TryGetProperty("fullName", out var p) ? p.GetString() ?? "" : "";
+        try
+        {
+            if (!File.Exists(fullName)) throw new InvalidOperationException("File not found");
+            
+            var ext = Path.GetExtension(fullName).ToLower();
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".bmp")
+            {
+                // Image file - read as base64
+                var bytes = File.ReadAllBytes(fullName);
+                var base64 = Convert.ToBase64String(bytes);
+                PostToWeb(new { type = "sftpPreviewResult", tabId, contentType = "image/" + ext.Substring(1), data = base64 });
+            }
+            else
+            {
+                // Text file - read as text (limit to 100KB)
+                var bytes = File.ReadAllBytes(fullName);
+                if (bytes.Length > 100000)
+                {
+                    PostToWeb(new { type = "sftpPreviewResult", tabId, error = "File too large for preview (max 100KB)" });
+                    return;
+                }
+                var text = System.Text.Encoding.UTF8.GetString(bytes);
+                PostToWeb(new { type = "sftpPreviewResult", tabId, contentType = "text/plain", data = text });
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] preview failed: {ex.Message}");
+            PostToWeb(new { type = "sftpPreviewResult", tabId, error = ex.Message });
+        }
+    }
+
+    private void HandleSftpPreview(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var remotePath = root.TryGetProperty("remotePath", out var rp) ? rp.GetString() ?? "" : "";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpPreviewResult", tabId, error = "Connection not found" }); return; }
+        try
+        {
+            var ext = Path.GetExtension(remotePath).ToLower();
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".bmp")
+            {
+                // Image file - download to temp and convert to base64
+                var tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ext);
+                using var sftp = NewSftp(conn);
+                sftp.DownloadFile(remotePath, tempPath);
+                var bytes = File.ReadAllBytes(tempPath);
+                File.Delete(tempPath);
+                var base64 = Convert.ToBase64String(bytes);
+                PostToWeb(new { type = "sftpPreviewResult", tabId, contentType = "image/" + ext.Substring(1), data = base64 });
+            }
+            else
+            {
+                // Text file - download to temp and read as text (limit to 100KB)
+                var tempPath = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".txt");
+                using var sftp = NewSftp(conn);
+                sftp.DownloadFile(remotePath, tempPath);
+                var bytes = File.ReadAllBytes(tempPath);
+                File.Delete(tempPath);
+                if (bytes.Length > 100000)
+                {
+                    PostToWeb(new { type = "sftpPreviewResult", tabId, error = "File too large for preview (max 100KB)" });
+                    return;
+                }
+                var text = System.Text.Encoding.UTF8.GetString(bytes);
+                PostToWeb(new { type = "sftpPreviewResult", tabId, contentType = "text/plain", data = text });
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] preview failed: {ex.Message}");
+            PostToWeb(new { type = "sftpPreviewResult", tabId, error = ex.Message });
+        }
+    }
+
+    private void HandleLocalDiskInfo(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var path = root.TryGetProperty("path", out var p) ? p.GetString() ?? "" : "";
+        try
+        {
+            DriveInfo driveInfo;
+            if (!string.IsNullOrEmpty(path) && Path.IsPathRooted(path))
+            {
+                var driveLetter = Path.GetPathRoot(path);
+                driveInfo = new DriveInfo(driveLetter);
+            }
+            else
+            {
+                driveInfo = new DriveInfo("C");
+            }
+            var total = driveInfo.TotalSize;
+            var free = driveInfo.AvailableFreeSpace;
+            var used = total - free;
+            var usedPct = total > 0 ? (double)used / total * 100 : 0;
+            PostToWeb(new { type = "sftpDiskInfoResult", tabId, total, free, used, usedPct });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[local] disk info failed: {ex.Message}");
+            PostToWeb(new { type = "sftpDiskInfoResult", tabId, error = ex.Message });
+        }
+    }
+
+    private void HandleSftpDiskInfo(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpDiskInfoResult", tabId, error = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            // Use df command to get disk info
+            var output = sftp.RunSsh("df -h");
+            // Parse df output (simplified)
+            PostToWeb(new { type = "sftpDiskInfoResult", tabId, isRemote = true, rawOutput = output });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] disk info failed: {ex.Message}");
+            PostToWeb(new { type = "sftpDiskInfoResult", tabId, error = ex.Message });
+        }
+    }
+
+    private void HandleSftpDeleteMultiple(JsonElement root)
+    {
+        var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
+        var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+        var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var paths = new List<string>();
+        if (root.TryGetProperty("paths", out var p))
+        {
+            if (p.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in p.EnumerateArray()) if (el.ValueKind == JsonValueKind.String) paths.Add(el.GetString() ?? "");
+            }
+        }
+        var conn = _store.Get(connId);
+        if (conn == null) { PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = "Connection not found" }); return; }
+        try
+        {
+            using var sftp = NewSftp(conn);
+            sftp.RemoveMultipleRemote(paths.ToArray());
+            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = true });
+            PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"[sftp] delete multiple failed: {ex.Message}");
+            PostToWeb(new { type = "sftpOpResult", op = "delete", tabId, ok = false, message = ex.Message });
+        }
+    }
+
+    private void DirectoryCopy(string sourceDirName, string destDirName, bool copySubDirs)
+    {
+        var dir = new DirectoryInfo(sourceDirName);
+        var dirs = dir.GetDirectories();
+        if (!Directory.Exists(destDirName))
+        {
+            Directory.CreateDirectory(destDirName);
+        }
+        var files = dir.GetFiles();
+        foreach (var file in files)
+        {
+            var tempPath = Path.Combine(destDirName, file.Name);
+            file.CopyTo(tempPath, true);
+        }
+        if (copySubDirs)
+        {
+            foreach (var subdir in dirs)
+            {
+                var tempPath = Path.Combine(destDirName, subdir.Name);
+                DirectoryCopy(subdir.FullName, tempPath, copySubDirs);
+            }
         }
     }
 

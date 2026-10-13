@@ -134,7 +134,41 @@ namespace SshManager
         }
         public void GzipRemote(string remotePath)
         {
-            RunSsh($"gzip -f -- {ShellQuote(remotePath)}");
+            RunSsh($"gzip -f {ShellQuote(remotePath)}");
+        }
+
+        public void UnzipRemote(string remotePath)
+        {
+            RunSsh($"gzip -d {ShellQuote(remotePath)}");
+        }
+
+        public void DuplicateRemote(string sourcePath, string destPath)
+        {
+            RunSsh($"cp {ShellQuote(sourcePath)} {ShellQuote(destPath)}");
+        }
+
+        public void TarZipRemote(string archiveName, string[] filePaths, string workingDir)
+        {
+            // Extract just file names (not full paths) to avoid directory structure in archive
+            var fileNames = filePaths.Select(p => p.EndsWith("/") ? p : System.IO.Path.GetFileName(p)).ToArray();
+            var files = string.Join(" ", fileNames.Select(ShellQuote));
+            RunSsh($"cd {ShellQuote(workingDir)} && tar -c -f - {files} | gzip > {ShellQuote(archiveName)}");
+        }
+
+        public void UntarUnzipRemote(string archivePath, string workingDir)
+        {
+            RunSsh($"cd {ShellQuote(workingDir)} && gzip -d -c {ShellQuote(archivePath)} | tar -x -f -");
+        }
+
+        public void RemoveMultipleRemote(string[] paths)
+        {
+            var commands = string.Join("\n", paths.Select(p => $"rm {Quote(p)}"));
+            RunBatch(commands);
+        }
+
+        public void BackupRemote(string sourcePath, string destPath)
+        {
+            RunSsh($"cp {ShellQuote(sourcePath)} {ShellQuote(destPath)}");
         }
 
         private string RunBatch(string commands)
@@ -187,13 +221,13 @@ namespace SshManager
             return stdout.ToString();
         }
 
-        private string RunSsh(string remoteCommand)
+        public string RunSsh(string remoteCommand)
         {
             var ssh = GitBash.FindSsh() ??
                 throw new InvalidOperationException("ssh.exe not found");
 
             var args = new StringBuilder();
-            args.Append($"-p {_port} -o StrictHostKeyCheckinf=accept-new -o BatchMode=no");
+            args.Append($"-p {_port} -o StrictHostKeyChecking=accept-new -o BatchMode=no");
             if (!string.IsNullOrWhiteSpace(_keyPath))
                 args.Append($" -i \"{_keyPath}\"");
             args.Append($" {_user}@{_host} {remoteCommand}");

@@ -4,7 +4,9 @@ const tabs = {};
 let activeTab = null;
 let focusedPane = null;
 let seq = 0, tabSeq = 0;
-const sftpProgress = {}; // map tabId -> { file -> { el, bar, label } }
+const sftpTransfers = {}; // map tabId -> { rows: { '<dir>|<file>' -> row } }
+const sftpHistory = {}; // map tabId -> { local: { history: [], index: -1 }, remote: { history: [], index: -1 } }
+const sftpBookmarks = { local: [], remote: [] }; // Bookmarks for local and remote directories
 function post(msg) { if (bridge) bridge.postMessage(msg); }
 
 // Coalesce expensive fit.fit() calls per-session to avoid forced reflow storms.
@@ -44,6 +46,7 @@ function newSftpTab(conn, originTabId, remoteHome) {
     const paneEl = document.createElement('div');
     paneEl.className = 'pane sftp-pane';
     paneEl.dataset.sid = '';
+    paneEl.dataset.connId = conn.Id;
 
     const bar = document.createElement('div');
     bar.className = 'pane-bar';
@@ -51,16 +54,33 @@ function newSftpTab(conn, originTabId, remoteHome) {
 
     const content = document.createElement('div');
     content.className = 'sftp-content';
-    content.innerHTML = '<div class="sftp-local" id="sftp-local-' + tabId + '">'
-        + '<div class="sftp-header"> <button class="sftp-up-local" title="Parent Directory">..</button><button class="sftp-refresh-local" title="Refresh">&#x21bb;</button>'
-        + '<input class="sftp-path-local" id="sftp-path-local-' + tabId + '" value="" /></div > '
+    content.innerHTML = '<div class="sftp-main-area">'
+        + '<div class="sftp-main">'
+        + '<div class="sftp-local" id="sftp-local-' + tabId + '">'
+        + '<div class="sftp-header"> <button class="sftp-back-local" title="Back">&#x2190;</button><button class="sftp-forward-local" title="Forward">&#x2192;</button><button class="sftp-up-local" title="Parent Directory">..</button><button class="sftp-refresh-local" title="Refresh">&#x21bb;</button><button class="sftp-bookmark-local" title="Bookmark">&#x2605;</button><button class="sftp-disk-local" title="Disk Info">&#x1F4BE;</button>'
+        + '<input class="sftp-path-local" id="sftp-path-local-' + tabId + '" value="" /><span class="sftp-disk-info-local" id="sftp-disk-info-local-' + tabId + '"></span></div > '
         + '<div class="sftp-list" id="sftp-list-local-' + tabId + '"></div>'
         + '</div>'
         + '<div class="sftp-split"></div>'
         + '<div class="sftp-remote" id="sftp-remote-' + tabId + '">'
-        + '<div class="sftp-header"><button class="sftp-up-remote" title="Parent Directory">..</button><button class="sftp-refresh-remote" title="Refresh">&#x21bb;</button>'
-        + '<input class="sftp-path-remote" id="sftp-path-remote-' + tabId + '" value="/" /></div > '
+        + '<div class="sftp-header"><button class="sftp-back-remote" title="Back">&#x2190;</button><button class="sftp-forward-remote" title="Forward">&#x2192;</button><button class="sftp-up-remote" title="Parent Directory">..</button><button class="sftp-refresh-remote" title="Refresh">&#x21bb;</button><button class="sftp-bookmark-remote" title="Bookmark">&#x2605;</button><button class="sftp-disk-remote" title="Disk Info">&#x1F4BE;</button>'
+        + '<input class="sftp-path-remote" id="sftp-path-remote-' + tabId + '" value="/" /><span class="sftp-disk-info-remote" id="sftp-disk-info-remote-' + tabId + '"></span></div > '
         + '<div class="sftp-list" id="sftp-list-remote-' + tabId + '"></div>'
+        + '</div>'
+        + '</div>'
+        + '<div class="sftp-hsplit" title="Drag to Resize"></div>'
+        + '<div class="sftp-transfers" id="sftp-transfers-' + tabId + '">'
+        + '<div class="sftp-transfers-head">'
+        + '<span class="sftp-transfers-title">Upload/Downloads</span>'
+        + '<span class="sftp-transfers-summary" id="sftp-transfers-summary-' + tabId + '"></span>'
+        + '<button class="sftp-transfers-toggle" title="(Un)Collapse">&#x25be</button>'
+        + '<button class="sftp-transfers-clear" title="Clear Finished">Clear</button>'
+        + '<button class="sftp-cancel"  id="sftp-cancel-' + tabId + '" style="display:none">Cancel</button>'
+        + '</div>'
+        + '<div class="sftp-progress" id="sftp-progress-' + tabId + '">'
+        + '<div class="sftp-transfers-empty">No transfers</div>'
+        + '</div>'
+        + '</div>'
         + '</div>';
 
     paneEl.appendChild(bar);
@@ -73,6 +93,12 @@ function newSftpTab(conn, originTabId, remoteHome) {
     tabs[tabId] = { id: tabId, tabEl, container, connId: conn.Id };
     activateTab(tabId);
 
+    // Initialize history for this tab
+    sftpHistory[tabId] = {
+        local: { history: [], index: -1 },
+        remote: { history: [], index: -1 }
+    };
+
     // request initial listings: local HOME and remote HOME
     post({ type: 'sftpListLocal', tabId: tabId, path: undefined });
     post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: remoteHome || '/' });
@@ -84,14 +110,7 @@ function newSftpTab(conn, originTabId, remoteHome) {
     const upRemote = content.querySelector('.sftp-up-remote');
     const pathRemote = content.querySelector('.sftp-path-remote');
     const listRemote = content.querySelector('.sftp-list');
-    const cancelBtn = document.getElementById('sftp-cancel-' + tabId);
-    const progressContainer = document.getElementById('sftp-progress-' + tabId);
-    sftpProgress[tabId] = {};
-    if (cancelBtn) {
-        cancelBtn.onclick = (e) => { e.preventDefault(); post({ type: 'sftpCancelUpload', tabId }); };
-        cancelBtn.style.display = 'none';
-    }
-
+    setupSftpTransfers(tabId, content);
     upLocal.onclick = () => {
         const cur = pathLocal.value || '';
         const parent = cur.split(/[\\/]+/).slice(0, -1).join('/');
@@ -114,6 +133,221 @@ function newSftpTab(conn, originTabId, remoteHome) {
     pathRemote.onkeydown = (e) => { if (e.key === 'Enter') post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value }); };
     const refreshRemote = content.querySelector('.sftp-refresh-remote');
     if (refreshRemote) refreshRemote.onclick = () => post({ type: 'sftpListRemote', tabId: tabId, connId: conn.Id, path: pathRemote.value });
+
+    // History navigation controls
+    const backLocal = content.querySelector('.sftp-back-local');
+    const forwardLocal = content.querySelector('.sftp-forward-local');
+    const backRemote = content.querySelector('.sftp-back-remote');
+    const forwardRemote = content.querySelector('.sftp-forward-remote');
+
+    function updateHistoryButtons(side) {
+        const hist = sftpHistory[tabId][side];
+        const backBtn = side === 'local' ? backLocal : backRemote;
+        const forwardBtn = side === 'local' ? forwardLocal : forwardRemote;
+        if (backBtn) backBtn.disabled = hist.index <= 0;
+        if (forwardBtn) forwardBtn.disabled = hist.index >= hist.history.length - 1;
+    }
+
+    function addToHistory(side, path) {
+        const hist = sftpHistory[tabId][side];
+        // Remove any forward history if we're not at the end
+        if (hist.index < hist.history.length - 1) {
+            hist.history = hist.history.slice(0, hist.index + 1);
+        }
+        // Don't add duplicate consecutive entries
+        if (hist.history.length > 0 && hist.history[hist.history.length - 1] === path) {
+            return;
+        }
+        hist.history.push(path);
+        hist.index = hist.history.length - 1;
+        updateHistoryButtons(side);
+    }
+
+    function navigateHistory(side, direction) {
+        const hist = sftpHistory[tabId][side];
+        const newIndex = hist.index + direction;
+        if (newIndex < 0 || newIndex >= hist.history.length) return;
+        hist.index = newIndex;
+        const path = hist.history[newIndex];
+        const pathInput = side === 'local' ? pathLocal : pathRemote;
+        pathInput.value = path;
+        if (side === 'local') {
+            post({ type: 'sftpListLocal', tabId, path });
+        } else {
+            post({ type: 'sftpListRemote', tabId, connId: conn.Id, path });
+        }
+        updateHistoryButtons(side);
+    }
+
+    if (backLocal) backLocal.onclick = () => navigateHistory('local', -1);
+    if (forwardLocal) forwardLocal.onclick = () => navigateHistory('local', 1);
+    if (backRemote) backRemote.onclick = () => navigateHistory('remote', -1);
+    if (forwardRemote) forwardRemote.onclick = () => navigateHistory('remote', 1);
+
+    // Hook into navigation to update history
+    const originalUpLocalClick = upLocal.onclick;
+    upLocal.onclick = () => {
+        originalUpLocalClick();
+        setTimeout(() => addToHistory('local', pathLocal.value), 0);
+    };
+
+    const originalUpRemoteClick = upRemote.onclick;
+    upRemote.onclick = () => {
+        originalUpRemoteClick();
+        setTimeout(() => addToHistory('remote', pathRemote.value), 0);
+    };
+
+    const originalPathLocalKeydown = pathLocal.onkeydown;
+    pathLocal.onkeydown = (e) => {
+        originalPathLocalKeydown(e);
+        if (e.key === 'Enter') {
+            setTimeout(() => addToHistory('local', pathLocal.value), 0);
+        }
+    };
+
+    const originalPathRemoteKeydown = pathRemote.onkeydown;
+    pathRemote.onkeydown = (e) => {
+        originalPathRemoteKeydown(e);
+        if (e.key === 'Enter') {
+            setTimeout(() => addToHistory('remote', pathRemote.value), 0);
+        }
+    };
+
+    // Bookmark controls
+    const bookmarkLocal = content.querySelector('.sftp-bookmark-local');
+    const bookmarkRemote = content.querySelector('.sftp-bookmark-remote');
+
+    function toggleBookmark(side, path) {
+        const bookmarks = sftpBookmarks[side];
+        const index = bookmarks.indexOf(path);
+        if (index >= 0) {
+            bookmarks.splice(index, 1);
+            showToast('Bookmark removed', 2000);
+        } else {
+            bookmarks.push(path);
+            showToast('Bookmark added', 2000);
+        }
+        updateBookmarkButton(side, path);
+    }
+
+    function updateBookmarkButton(side, currentPath) {
+        const btn = side === 'local' ? bookmarkLocal : bookmarkRemote;
+        if (!btn) return;
+        const isBookmarked = sftpBookmarks[side].includes(currentPath);
+        btn.style.color = isBookmarked ? '#FFD700' : '';
+    }
+
+    function showBookmarkMenu(side, x, y) {
+        closeTabMenu();
+        const menu = document.createElement('div');
+        menu.className = 'tab-menu';
+        const bookmarks = sftpBookmarks[side];
+        
+        if (bookmarks.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'tab-menu-item';
+            empty.textContent = 'No bookmarks';
+            empty.style.color = '#888';
+            menu.appendChild(empty);
+        } else {
+            bookmarks.forEach((path, i) => {
+                const el = document.createElement('div');
+                el.className = 'tab-menu-item';
+                el.textContent = path.substring(path.lastIndexOf('/') + 1) || path;
+                el.title = path;
+                el.onclick = () => {
+                    closeTabMenu();
+                    const pathInput = side === 'local' ? pathLocal : pathRemote;
+                    pathInput.value = path;
+                    if (side === 'local') {
+                        post({ type: 'sftpListLocal', tabId, path });
+                    } else {
+                        post({ type: 'sftpListRemote', tabId, connId: conn.Id, path });
+                    }
+                };
+                menu.appendChild(el);
+            });
+        }
+        
+        const sep = document.createElement('div');
+        sep.className = 'tab-menu-sep';
+        menu.appendChild(sep);
+        
+        const clearBtn = document.createElement('div');
+        clearBtn.className = 'tab-menu-item';
+        clearBtn.textContent = 'Clear Bookmarks';
+        clearBtn.onclick = () => {
+            closeTabMenu();
+            sftpBookmarks[side] = [];
+            updateBookmarkButton(side, side === 'local' ? pathLocal.value : pathRemote.value);
+        };
+        menu.appendChild(clearBtn);
+        
+        document.body.appendChild(menu);
+        const w = menu.offsetWidth, h = menu.offsetHeight;
+        menu.style.left = Math.min(x, window.innerWidth - w - 4) + 'px';
+        menu.style.top = Math.min(y, window.innerHeight - h - 4) + 'px';
+        tabMenuEl = menu;
+        setTimeout(() => {
+            document.addEventListener('mousedown', onDocMouseDownForTabMenu, true);
+            document.addEventListener('keydown', onDocKeyDownForTabMenu, true);
+        }, 0);
+    }
+
+    if (bookmarkLocal) {
+        bookmarkLocal.onclick = (e) => {
+            e.stopPropagation();
+            if (e.shiftKey) {
+                showBookmarkMenu('local', e.clientX, e.clientY);
+            } else {
+                toggleBookmark('local', pathLocal.value);
+            }
+        };
+    }
+
+    if (bookmarkRemote) {
+        bookmarkRemote.onclick = (e) => {
+            e.stopPropagation();
+            if (e.shiftKey) {
+                showBookmarkMenu('remote', e.clientX, e.clientY);
+            } else {
+                toggleBookmark('remote', pathRemote.value);
+            }
+        };
+    }
+
+    // Update bookmark button state when path changes
+    const originalPathLocalUpdate = pathLocal.onkeydown;
+    pathLocal.onkeydown = (e) => {
+        originalPathLocalUpdate(e);
+        if (e.key === 'Enter') {
+            setTimeout(() => updateBookmarkButton('local', pathLocal.value), 0);
+        }
+    };
+
+    const originalPathRemoteUpdate = pathRemote.onkeydown;
+    pathRemote.onkeydown = (e) => {
+        originalPathRemoteUpdate(e);
+        if (e.key === 'Enter') {
+            setTimeout(() => updateBookmarkButton('remote', pathRemote.value), 0);
+        }
+    };
+
+    // Disk info controls
+    const diskLocal = content.querySelector('.sftp-disk-local');
+    const diskRemote = content.querySelector('.sftp-disk-remote');
+
+    if (diskLocal) {
+        diskLocal.onclick = () => {
+            post({ type: 'localDiskInfo', tabId, path: pathLocal.value });
+        };
+    }
+
+    if (diskRemote) {
+        diskRemote.onclick = () => {
+            post({ type: 'sftpDiskInfo', tabId, connId: conn.Id, path: pathRemote.value });
+        };
+    }
 
     // simple drag handlers: local -> remote upload
     const localEl = content.querySelector('.sftp-local');
@@ -146,14 +380,283 @@ function newSftpTab(conn, originTabId, remoteHome) {
     localEl.addEventListener('drop', (e) => {
         e.preventDefault();
         try {
-            const data = e.dataTransfer.getData('text/plain');
-            if (!data) return;
+            // support multiple paths encoded as JSON or newline separated
+            let data = e.dataTransfer.getData('application/json');
+            let paths = [];
+            if (data) {
+                try { paths = JSON.parse(data); } catch { paths = []; }
+            }
+            if (!paths || paths.length === 0) {
+                data = e.dataTransfer.getData('text/plain');
+                if (!data) return;
+                paths = data.split(/\r?\n/).filter(Boolean);
+            }
+            if (!paths || paths.length === 0) return;
             // download into current local path shown in the UI
             const localPathInput = document.getElementById('sftp-path-local-' + tabId);
             const localDir = localPathInput && localPathInput.value ? localPathInput.value : undefined;
-            post({ type: 'sftpDownload', tabId: tabId, connId: conn.Id, remotePath: data, localDir: localDir });
+            // send download request for multiple files
+            paths.forEach(p => {
+                post({ type: 'sftpDownload', tabId: tabId, connId: conn.Id, remotePath: p, localDir: localDir });
+            });
         } catch (_) { }
     });
+
+    // vertical split drag handler (resize local/remote panes)
+    const vSplit = content.querySelector('.sftp-split');
+    if (vSplit) {
+        let startX = 0, startW = 0;
+        const onMove = (e) => {
+            const mainArea = content.querySelector('.sftp-main');
+            if (!mainArea) return;
+            const rect = mainArea.getBoundingClientRect();
+            const offset = e.clientX - startX;
+            const newW = Math.max(100, Math.min(rect.width - 100, startW + offset));
+            localEl.style.flex = `0 0 ${newW}px`;
+            remoteEl.style.flex = '1 1 0';
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = '';
+        };
+        vSplit.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            startX = e.clientX;
+            startW = localEl.offsetWidth;
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = 'col-resize';
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+    }
+}
+
+function sftpPanelEls(tabId) {
+    return {
+        panel: document.getElementById('sftp-transfers-' + tabId),
+        list: document.getElementById('sftp-progress-' + tabId),
+        summary: document.getElementById('sftp-transfers-summary' + tabId),
+        cancel: document.getElementById('sftp-cancel-' + tabId)
+    };
+}
+
+function sftpUpdateSummary(tabId) {
+    const state = sftpTransfers[tabId];
+    const { list, summary, cancel } = sftpPanelEls(tabId);
+    const rows = state ? Object.values(state.rows) : [];
+    if (list) {
+        const empty = list.querySelector('.sftp-transfers-empty');
+        if (empty) empty.style.display = rows.length ? 'none' : '';
+    }
+    if (cancel) {
+        const activeUp = rows.some(r => r.dir === 'up' && (r.status === 'queued' || r.status === 'running'));
+        cancel.style.display = activeUp ? '': 'none';
+    }
+    if (!summary) return;
+    if (!rows.length) { summary.textContent = ''; return; }
+    const active = rows.filter(r => r.status === 'queued' || r.status === 'running').length;
+    const failed = rows.filter(r => r.status === 'failed').length;
+    const parts = [];
+    if (active) parts.push(active + ' running');
+    parts.push(rows.length + ' total');
+    if (failed) parts.push(failed + ' errors');
+    summary.textContent = parts.join(' \u00b7');
+}
+
+function sftpBaseName(path) {
+    if (!path) return '';
+    const parts = path.split(/[\\/]/);
+    return parts[parts.length - 1] || path;
+}
+
+function sftpAddTransfer(tabId, dir, file, label) {
+    const { list } = sftpPanelEls(tabId);
+    if (!list) return null;
+    const state = sftpTransfers[tabId] || (sftpTransfers[tabId] = { rows: {} });
+    const key = dir + '|' + file;
+    if (state.rows[key]) return state.rows[key];
+
+    const el = document.createElement('div');
+    el.className = 'sftp-transfer ' + dir + ' queued';
+    const dirEl = document.createElement('span');
+    dirEl.className = 'sftp-transfer-dir';
+    dirEl.title = dir === 'down' ? 'Download' : 'Upload';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'sftp-transfer-name';
+    nameEl.textContent = label || sftpBaseName(file) || file;
+    nameEl.title = file;
+    const barWrap = document.createElement('div');
+    barWrap.className = 'sftp-transfer-bar-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'sftp-transfer-bar';
+    barWrap.appendChild(bar);
+    const pctEl = document.createElement('span');
+    pctEl.className = 'sftp-transfer-pct';
+    pctEl.textContent = '0%';
+    const stateEl = document.createElement('span');
+    stateEl.className = 'sftp-transfer-state';
+    stateEl.textContent = ' enqueued';
+    el.appendChild(dirEl);
+    el.appendChild(nameEl);
+    el.appendChild(barWrap);
+    el.appendChild(pctEl);
+    el.appendChild(stateEl);
+    list.appendChild(el);
+
+    const row = { key, dir, file, el, bar, pctEl, stateEl, status: 'queued' };
+    state.rows[key] = row;
+    sftpUpdateSummary(tabId);
+    list.scrollTop = list.scrollHeight;
+    return row;
+}
+
+function sftpSetTransfer(tabId, dir, file, status, opts) {
+    opts = opts || {};
+
+    const state = sftpTransfers[tabId];
+    const row = state && state.rows[dir + '|' + file];
+    if (!row) return;
+    row.status = status;
+    row.el.classList.remove('queued', 'running', 'done', 'failed', 'canceled');
+    row.el.classList.add(status);
+    if (typeof opts.pct === 'number') {
+        const pct = Math.max(0, Math.min(100, Math.round(opts.pct)));
+        row.bar.style.width = pct + '%';
+        row.pctEl.textContent = pct + '%';
+    }
+    const labels = { queued: 'enqueued', running: 'running', done: 'done', failed: 'failed', canceled: 'cancelled' };
+    row.stateEl.textContent = opts.text || labels[status] || status;
+    if (opts.message) row.stateEl.title = opts.message;
+    sftpUpdateSummary(tabId);
+}
+
+function sftpFinishAll(tabId, dir, status) {
+    const state = sftpTransfers[tabId];
+    if (!state) return;
+    Object.values(state.rows).forEach(r => {
+        if (r.dir === dir && (r.status === 'queued' || r.status === 'running'))
+            sftpSetTransfer(tabId, dir, r.file, status);
+    });
+}
+
+function setupSftpTransfers(tabId, content) {
+    const { panel, cancel } = sftpPanelEls(tabId);
+    sftpTransfers[tabId] = { rows: {} };
+
+    if (cancel) cancel.onclick = (e) => {
+        e.preventDefault();
+        post({ type: 'sftpCancelUpload', tabId });
+        sftpFinishAll(tabId, 'up', 'canceled');
+    };
+
+    // Keyboard shortcuts for SFTP panel
+    content.addEventListener('keydown', (e) => {
+        const localList = document.getElementById('sftp-list-local-' + tabId);
+        const remoteList = document.getElementById('sftp-list-remote-' + tabId);
+        const localPathInput = document.getElementById('sftp-path-local-' + tabId);
+        const remotePathInput = document.getElementById('sftp-path-remote-' + tabId);
+        const activeElement = document.activeElement;
+
+        // Don't trigger shortcuts when typing in path inputs
+        if (activeElement === localPathInput || activeElement === remotePathInput) return;
+
+        // Delete - Delete selected files
+        if (e.key === 'Delete') {
+            const localSelected = localList ? localList.querySelectorAll('.sftp-item.selected') : [];
+            const remoteSelected = remoteList ? remoteList.querySelectorAll('.sftp-item.selected') : [];
+
+            if (localSelected.length > 0) {
+                e.preventDefault();
+                const selectedPaths = Array.from(localSelected).map(el => el.dataset.full);
+                const parentPath = localPathInput ? localPathInput.value : '';
+                const paneEl = document.getElementById('panes-' + tabId)?.querySelector('.pane');
+                const connId = paneEl ? paneEl.dataset.connId : '';
+                if (confirm('Delete ' + selectedPaths.length + ' files?'))
+                    post({ type: 'localDeleteMultiple', tabId, connId, paths: selectedPaths, path: parentPath });
+            } else if (remoteSelected.length > 0) {
+                e.preventDefault();
+                const selectedPaths = Array.from(remoteSelected).map(el => el.dataset.full);
+                const parentPath = remotePathInput ? remotePathInput.value : '/';
+                const paneEl = document.getElementById('panes-' + tabId)?.querySelector('.pane');
+                const connId = paneEl ? paneEl.dataset.connId : '';
+                if (confirm('Delete ' + selectedPaths.length + ' files?'))
+                    post({ type: 'sftpDeleteMultiple', tabId, connId, paths: selectedPaths, path: parentPath });
+            }
+        }
+
+        // F5 - Refresh
+        if (e.key === 'F5') {
+            e.preventDefault();
+            if (localPathInput) post({ type: 'sftpListLocal', tabId, path: localPathInput.value });
+            if (remotePathInput) {
+                const paneEl = document.getElementById('panes-' + tabId)?.querySelector('.pane');
+                const connId = paneEl ? paneEl.dataset.connId : '';
+                if (connId) post({ type: 'sftpListRemote', tabId, connId, path: remotePathInput.value });
+            }
+        }
+
+        // Ctrl+A - Select all
+        if (e.key === 'a' && e.ctrlKey) {
+            e.preventDefault();
+            if (activeElement === localList || localList?.contains(activeElement)) {
+                if (localList) localList.querySelectorAll('.sftp-item').forEach(el => el.classList.add('selected'));
+            } else if (activeElement === remoteList || remoteList?.contains(activeElement)) {
+                if (remoteList) remoteList.querySelectorAll('.sftp-item').forEach(el => el.classList.add('selected'));
+            }
+        }
+
+        // Esc - Clear selection
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            if (localList) localList.querySelectorAll('.sftp-item.selected').forEach(el => el.classList.remove('selected'));
+            if (remoteList) remoteList.querySelectorAll('.sftp-item.selected').forEach(el => el.classList.remove('selected'));
+        }
+    });
+
+    if (panel) {
+        const clearBtn = panel.querySelector('.sftp-transfers-clear');
+        if (clearBtn) clearBtn.onclick = () => {
+            const state = sftpTransfers[tabId];
+            if (!state) return;
+            Object.values(state.rows).forEach(r => {
+                if (r.status !== 'queued' && r.status !== 'running') { r.el.remove(); delete state.rows[r.key]; }
+            });
+            sftpUpdateSummary(tabId);
+        };
+
+        const toggle = panel.querySelector('.sftp-transfers-toggle');
+        if (toggle) toggle.onclick = () => {
+            panel.classList.toggle('collapsed');
+            toggle.innerHTML = panel.classList.contains('collapsed') ? '&#x25b4;' : '&#x25be;';
+        };
+
+        const hsplit = content.querySelector('.sftp-hsplit');
+        if (hsplit) {
+            let startY = 0, startH = 0;
+            const onMove = (e) => {
+                const max = Math.max(80, content.clientHeight - 100);
+                const h = Math.max(30, Math.min(startH + (startY - e.clientY), max));
+                panel.style.height = h + 'px';
+            };
+            const onUp = () => {
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+                document.body.style.cursor = '';
+            };
+            hsplit.addEventListener('mousedown', (e) => {
+                e.preventDefault();
+                startY = e.clientY;
+                startH = panel.offsetHeight;
+                panel.classList.remove('collapsed');
+                if (toggle) toggle.innerHTML = '&#x25be;';
+                document.addEventListener('mousemove', onMove);
+                document.addEventListener('mouseup', onUp);
+                document.body.style.cursor = 'row-resize';
+            });
+        }
+    }
 }
 function scheduleFitBySid(sid) {
     const s = sessions[sid];
@@ -1011,6 +1514,7 @@ function closeTab(tabId,skipSessions) {
     t.tabEl.remove();
     t.container.remove();
     delete tabs[tabId];
+    delete sftpTransfers[tabId];
 
     const ids = Object.keys(tabs);
     if (ids.length) activateTab(ids[ids.length - 1]);
@@ -1299,39 +1803,135 @@ function buildRemoteMenu(ctx, it) {
     if (it) {
         items.push({ sep: true });
         if (!it.isDirectory) {
-            items.push({ label: 'Download', action: () => post({ type: 'sftpDownload', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName }) })
-        }
-        items.push({
-            label: 'Rename file...', action: () => {
-                const newName = prompt('New name:', it.name);
-                if (newName && newName.trim() && newName.trim() != it.name)
-                    post({ type: 'sftpRenameRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
-            }
-        });
-        if (!it.isDirectory) {
             items.push({
-                label: 'Zip file (gzip)', action: () => {
-                    if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
-                        post({ type: 'sftpZipRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                label: 'Download', action: () => {
+                    // Get current local directory from the local path input
+                    const localPathInput = document.getElementById('sftp-path-local-' + ctx.tabId);
+                    const localDir = localPathInput && localPathInput.value ? localPathInput.value : undefined;
+                    post({ type: 'sftpDownload', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, localDir: localDir });
+                }
+            });
+            items.push({
+                label: 'Preview', action: () => {
+                    post({ type: 'sftpPreview', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName });
                 }
             });
         }
-        items.push({
-            label: 'Change Permissions...', action: () => {
-                const current = octalFromPerms(it.permissions);
-                const mode = prompt('New permissions (octal, e.g. 644 or 755):', current);
-                if (mode && mode.trim())
-                    post({ type: 'sftpChmod', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, mode: mode.trim() });
-            }
-        });
-        items.push({ sep: true });
-        items.push({
-            label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
-                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
-                    post({ type: 'sftpDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+        // Rename only for single selection
+        if (!ctx.multiSelect) {
+            items.push({
+                label: 'Rename file...', action: () => {
+                    const newName = prompt('New name:', it.name);
+                    if (newName && newName.trim() && newName.trim() != it.name)
+                        post({ type: 'sftpRenameRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
                 }
+            });
+            // Duplicate only for single selection
+            items.push({
+                label: 'Duplicate file...', action: () => {
+                    const newName = prompt('Duplicate as:', it.name + '.copy');
+                    if (newName && newName.trim())
+                        post({ type: 'sftpDuplicateRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
+                }
+            });
+            // Backup file for single selection
+            items.push({
+                label: 'Backup file', action: () => {
+                    if (confirm('Create backup of "' + it.name + '"?'))
+                        post({ type: 'sftpBackupRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                }
+            });
+        }
+        // Zip options
+        if (!it.isDirectory) {
+            if (it.name.endsWith('.gz')) {
+                items.push({
+                    label: 'Unzip file', action: () => {
+                        if (confirm('Unzip "' + it.name + '"? (removes .gz extension)'))
+                            post({ type: 'sftpUnzipRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                    }
+                });
+            } else {
+                items.push({
+                    label: 'Zip file (gzip)', action: () => {
+                        if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
+                            post({ type: 'sftpZipRemote', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                    }
+                });
             }
-        });
+        }
+        // Multi-select zip/unzip
+        if (ctx.multiSelect) {
+            const listEl = document.getElementById('sftp-list-remote-' + ctx.tabId);
+            const selected = listEl ? listEl.querySelectorAll('.sftp-item.selected') : [];
+            const selectedPaths = Array.from(selected).map(el => el.dataset.full);
+            const allGz = selectedPaths.every(p => p.endsWith('.gz'));
+            const noGz = selectedPaths.every(p => !p.endsWith('.gz'));
+
+            if (allGz) {
+                items.push({
+                    label: 'Unzip selected files', action: () => {
+                        if (confirm('Unzip ' + selectedPaths.length + ' files?'))
+                            post({ type: 'sftpUnzipRemoteMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
+                    }
+                });
+            } else if (noGz) {
+                items.push({
+                    label: 'Zip selected files', action: () => {
+                        if (confirm('Compress ' + selectedPaths.length + ' files?'))
+                            post({ type: 'sftpZipRemoteMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
+                    }
+                });
+            }
+            // Tar+Zip for multi-select
+            items.push({
+                label: 'Tar + Zip selected', action: () => {
+                    const archiveName = prompt('Archive name (e.g. archive.tar.gz):', 'archive.tar.gz');
+                    if (archiveName && archiveName.trim())
+                        post({ type: 'sftpTarZipRemote', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path });
+                }
+            });
+        }
+        // Change permissions only for single selection
+        if (!ctx.multiSelect) {
+            items.push({
+                label: 'Change Permissions...', action: () => {
+                    const current = octalFromPerms(it.permissions);
+                    const mode = prompt('New permissions (octal, e.g. 644 or 755):', current);
+                    if (mode && mode.trim())
+                        post({ type: 'sftpChmod', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, mode: mode.trim() });
+                }
+            });
+        }
+        // Untar+Unzip for .tar.gz files
+        if (!ctx.multiSelect && (it.name.endsWith('.tar.gz') || it.name.endsWith('.tgz'))) {
+            items.push({
+                label: 'Untar + Unzip', action: () => {
+                    if (confirm('Extract "' + it.name + '"?'))
+                        post({ type: 'sftpUntarUnzipRemote', tabId: ctx.tabId, connId: ctx.connId, archivePath: it.fullName, path: ctx.path });
+                }
+            });
+        }
+        items.push({ sep: true });
+        if (ctx.multiSelect) {
+            items.push({
+                label: 'Remove selected files', action: () => {
+                    const listEl = document.getElementById('sftp-list-remote-' + ctx.tabId);
+                    const selected = listEl ? listEl.querySelectorAll('.sftp-item.selected') : [];
+                    const selectedPaths = Array.from(selected).map(el => el.dataset.full);
+                    if (confirm('Delete ' + selectedPaths.length + ' files?'))
+                        post({ type: 'sftpDeleteMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
+                }
+            });
+        } else {
+            items.push({
+                label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
+                    if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
+                        post({ type: 'sftpDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+                    }
+                }
+            });
+        }
     }
     return items;
 }
@@ -1346,29 +1946,129 @@ function buildLocalMenu(ctx, it) {
     });
     if (it) {
         items.push({ sep: true });
+        // Upload to remote - single or multi
         items.push({
-            label: 'Rename file...', action: () => {
-                const newName = prompt('New name:', it.name);
-                if (newName && newName.trim() && newName.trim() != it.name)
-                    post({ type: 'localRename', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, newName: newName.trim() });
+            label: ctx.multiSelect ? 'Upload selected to Remote' : 'Upload to Remote', action: () => {
+                const listEl = document.getElementById('sftp-list-local-' + ctx.tabId);
+                const selected = listEl ? listEl.querySelectorAll('.sftp-item.selected') : [];
+                const selectedPaths = selected.length > 0 ? Array.from(selected).map(el => el.dataset.full) : [it.fullName];
+                // Get current remote directory from the remote path input
+                const remotePathInput = document.getElementById('sftp-path-remote-' + ctx.tabId);
+                const remoteDir = (remotePathInput && remotePathInput.value) ? remotePathInput.value : '/';
+                post({ type: 'sftpUpload', tabId: ctx.tabId, connId: ctx.connId, localPath: selectedPaths, remoteDir: remoteDir });
             }
         });
         if (!it.isDirectory) {
             items.push({
-                label: 'Zip file (gzip)', action: () => {
-                    if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
-                        post({ type: 'localZip', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path });
+                label: 'Preview', action: () => {
+                    post({ type: 'localPreview', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName });
+                }
+            });
+        }
+        // Rename only for single selection
+        if (!ctx.multiSelect) {
+            items.push({
+                label: 'Rename file...', action: () => {
+                    const newName = prompt('New name:', it.name);
+                    if (newName && newName.trim() && newName.trim() != it.name)
+                        post({ type: 'localRename', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path, newName: newName.trim() });
+                }
+            });
+            // Duplicate only for single selection
+            items.push({
+                label: 'Duplicate file...', action: () => {
+                    const newName = prompt('Duplicate as:', it.name + '.copy');
+                    if (newName && newName.trim())
+                        post({ type: 'localDuplicate', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path, newName: newName.trim() });
+                }
+            });
+            // Backup file for single selection
+            items.push({
+                label: 'Backup file', action: () => {
+                    if (confirm('Create backup of "' + it.name + '"?'))
+                        post({ type: 'localBackup', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path });
+                }
+            });
+        }
+        // Zip options - only show for single select
+        if (!ctx.multiSelect && !it.isDirectory) {
+            if (it.name.endsWith('.gz')) {
+                items.push({
+                    label: 'Unzip file', action: () => {
+                        if (confirm('Unzip "' + it.name + '"? (removes .gz extension)'))
+                            post({ type: 'localUnzip', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path });
+                    }
+                });
+            } else {
+                items.push({
+                    label: 'Zip file (gzip)', action: () => {
+                        if (confirm('Compress "' + it.name + '" with gzip ? (creates ' + it.name + '.gz )'))
+                            post({ type: 'localZip', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path });
+                    }
+                });
+            }
+        }
+        // Multi-select zip/unzip
+        if (ctx.multiSelect) {
+            const listEl = document.getElementById('sftp-list-local-' + ctx.tabId);
+            const selected = listEl ? listEl.querySelectorAll('.sftp-item.selected') : [];
+            const selectedPaths = Array.from(selected).map(el => el.dataset.full);
+            const allGz = selectedPaths.every(p => p.endsWith('.gz'));
+            const noGz = selectedPaths.every(p => !p.endsWith('.gz'));
+
+            if (allGz) {
+                items.push({
+                    label: 'Unzip selected files', action: () => {
+                        if (confirm('Unzip ' + selectedPaths.length + ' files?'))
+                            post({ type: 'localUnzipMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
+                    }
+                });
+            } else if (noGz) {
+                items.push({
+                    label: 'Zip selected files', action: () => {
+                        if (confirm('Compress ' + selectedPaths.length + ' files?'))
+                            post({ type: 'localZipMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
+                    }
+                });
+            }
+            // Tar+Zip for multi-select (local)
+            items.push({
+                label: 'Tar + Zip selected', action: () => {
+                    const archiveName = prompt('Archive name (e.g. archive.tar.gz):', 'archive.tar.gz');
+                    if (archiveName && archiveName.trim())
+                        post({ type: 'localTarZip', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path });
+                }
+            });
+        }
+        // Untar+Unzip for .tar.gz files (single)
+        if (!ctx.multiSelect && (it.name.endsWith('.tar.gz') || it.name.endsWith('.tgz'))) {
+            items.push({
+                label: 'Untar + Unzip', action: () => {
+                    if (confirm('Extract "' + it.name + '"?'))
+                        post({ type: 'localUntarUnzip', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path });
                 }
             });
         }
         items.push({ sep: true });
-        items.push({
-            label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
-                if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
-                    post({ type: 'localDelete', tabId: ctx.tabId, connId: ctx.connId, remotePath: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+        if (ctx.multiSelect) {
+            items.push({
+                label: 'Remove selected files', action: () => {
+                    const listEl = document.getElementById('sftp-list-local-' + ctx.tabId);
+                    const selected = listEl ? listEl.querySelectorAll('.sftp-item.selected') : [];
+                    const selectedPaths = Array.from(selected).map(el => el.dataset.full);
+                    if (confirm('Delete ' + selectedPaths.length + ' files?'))
+                        post({ type: 'localDeleteMultiple', tabId: ctx.tabId, connId: ctx.connId, paths: selectedPaths, path: ctx.path });
                 }
-            }
-        });
+            });
+        } else {
+            items.push({
+                label: it.isDirectory ? 'Remove Directory' : 'Remove File', action: () => {
+                    if (confirm('Delete "' + it.name + '"?' + (it.isDirectory ? ' The directory must be empty.' : ''))) {
+                        post({ type: 'localDelete', tabId: ctx.tabId, connId: ctx.connId, fullName: it.fullName, path: ctx.path, isDirectory: !!it.isDirectory });
+                    }
+                }
+            });
+        }
     }
     return items;
 }
@@ -1378,6 +2078,15 @@ function showSftpMenu(x, y, ctx) {
     const menu = document.createElement('div');
     menu.className = 'tab-menu';
     const it = ctx.item;
+    // Check if multiple items are selected
+    const listEl = ctx.local ? document.getElementById('sftp-list-local-' + ctx.tabId) : document.getElementById('sftp-list-remote-' + ctx.tabId);
+    const selectedCount = listEl ? listEl.querySelectorAll('.sftp-item.selected').length : 0;
+    ctx.multiSelect = selectedCount > 1;
+    // Get connId from pane data for local menu
+    if (ctx.local) {
+        const paneEl = document.getElementById('panes-' + ctx.tabId)?.querySelector('.pane');
+        if (paneEl) ctx.connId = paneEl.dataset.connId;
+    }
     const items = ctx.local ? buildLocalMenu(ctx, it) : buildRemoteMenu(ctx, it);
 
     items.forEach(mi => {
@@ -1482,27 +2191,63 @@ if (bridge) {
             const pathEl = document.getElementById('sftp-path-local-' + m.tabId);
             if (pathEl && m.path !== undefined) pathEl.value = m.path || '';
             if (!listEl) return;
+            // Initialize history with first path
+            if (sftpHistory[m.tabId] && sftpHistory[m.tabId].local.history.length === 0 && m.path) {
+                sftpHistory[m.tabId].local.history.push(m.path);
+                sftpHistory[m.tabId].local.index = 0;
+                const backBtn = document.querySelector('.sftp-back-local');
+                const forwardBtn = document.querySelector('.sftp-forward-local');
+                if (backBtn) backBtn.disabled = true;
+                if (forwardBtn) forwardBtn.disabled = true;
+            }
             const curLocalPathFor = () => (pathEl && pathEl.value) ? pathEl.value : (m.path || '');
+            // Update disk info automatically on first load
+            if (sftpHistory[m.tabId] && sftpHistory[m.tabId].local.history.length === 1) {
+                const diskLocal = document.querySelector('.sftp-disk-local');
+                if (diskLocal) diskLocal.click();
+            }
             renderSftpTable({
                 listEl,
                 items: m.items || [],
                 sortKey: 'local-' + m.tabId,
                 defaultCol: 'name',
-                columns: [ 
+                columns: [
                     { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '📂' : '📄 ') + it.name, sortVal: (it) => it.name },
-                    { id: 'size', label: 'Size', width: '110px', align: 'right', value: fmtSize, sortVal: (it) => it.size || 0},
+                    { id: 'size', label: 'Size', width: '110px', align: 'right', value: fmtSize, sortVal: (it) => it.size || 0 },
                     { id: 'mtime', label: 'Modified', width: '170px', value: fmtTime, sortVal: (it) => it.lastWriteTime ? Date.parse(it.lastWriteTime) : 0 },
                 ],
                 onRow: (tr, it) => {
                     wireSftpRow(tr, it);
                     if (it.isDirectory) tr.addEventListener('dblclick', () => {
                         pathEl.value = it.fullName;
-                        post({type: 'sftpListLocal', tabId: m.tabId, path: it.fullName });
+                        post({ type: 'sftpListLocal', tabId: m.tabId, path: it.fullName });
+                        // Add to history
+                        setTimeout(() => {
+                            if (sftpHistory[m.tabId]) {
+                                const hist = sftpHistory[m.tabId].local;
+                                if (hist.history.length > 0 && hist.history[hist.history.length - 1] !== it.fullName) {
+                                    hist.history.push(it.fullName);
+                                    hist.index = hist.history.length - 1;
+                                    const backBtn = document.querySelector('.sftp-back-local');
+                                    const forwardBtn = document.querySelector('.sftp-forward-local');
+                                    if (backBtn) backBtn.disabled = hist.index <= 0;
+                                    if (forwardBtn) forwardBtn.disabled = hist.index >= hist.history.length - 1;
+                                }
+                                // Update bookmark button
+                                const bookmarkBtn = document.querySelector('.sftp-bookmark-local');
+                                if (bookmarkBtn) {
+                                    const isBookmarked = sftpBookmarks.local.includes(it.fullName);
+                                    bookmarkBtn.style.color = isBookmarked ? '#FFD700' : '';
+                                }
+                            }
+                        }, 0);
                     });
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, item: it, path: curLocalPathFor(), local: true });
+                        const paneEl = document.getElementById('panes-' + m.tabId);
+                        const connId = paneEl ? paneEl.querySelector('.pane')?.dataset.connId : '';
+                        showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId, item: it, path: curLocalPathFor(), local: true });
                     });
                 }
             });
@@ -1511,7 +2256,9 @@ if (bridge) {
                 e.preventDefault();
                 e.stopPropagation();
                 // no specific item when clicking empty area
-                showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, item: null, path: curLocalPathFor(), local: true });
+                const paneEl = document.getElementById('panes-' + m.tabId);
+                const connId = paneEl ? paneEl.querySelector('.pane')?.dataset.connId : '';
+                showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId, item: null, path: curLocalPathFor(), local: true });
             };
         } else if (m.type === 'sftpRemoteListResult') {
             // { tabId, path, items }
@@ -1519,14 +2266,28 @@ if (bridge) {
             const pathEl = document.getElementById('sftp-path-remote-' + m.tabId);
             if (pathEl && m.path !== undefined) pathEl.value = m.path || '/';
             if (!listEl) return;
+            // Initialize history with first path
+            if (sftpHistory[m.tabId] && sftpHistory[m.tabId].remote.history.length === 0 && m.path) {
+                sftpHistory[m.tabId].remote.history.push(m.path);
+                sftpHistory[m.tabId].remote.index = 0;
+                const backBtn = document.querySelector('.sftp-back-remote');
+                const forwardBtn = document.querySelector('.sftp-forward-remote');
+                if (backBtn) backBtn.disabled = true;
+                if (forwardBtn) forwardBtn.disabled = true;
+            }
             const curPathFor = () => (pathEl && pathEl.value) ? pathEl.value : (m.path || '/');
+            // Update disk info automatically on first load
+            if (sftpHistory[m.tabId] && sftpHistory[m.tabId].remote.history.length === 1) {
+                const diskRemote = document.querySelector('.sftp-disk-remote');
+                if (diskRemote) diskRemote.click();
+            }
             renderSftpTable({
                 listEl,
                 items: m.items || [],
                 sortKey: 'remote-' + m.tabId,
                 defaultCol: 'name',
                 columns: [
-                { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '📂' : '📄 ') + it.name, sortVal: (it) => it.name },
+                    { id: 'name', label: 'Name', value: (it) => (it.isDirectory ? '📂' : '📄 ') + it.name, sortVal: (it) => it.name },
                     { id: 'size', label: 'Size', width: '100px', align: 'right', value: fmtSize, sortVal: (it) => it.size },
                     { id: 'owner', label: 'Owner', width: '110px', value: (it) => it.owner || '', sortVal: (it) => it.owner || '' },
                     { id: 'group', label: 'Group', width: '110px', value: (it) => it.group || '', sortVal: (it) => it.group || '' },
@@ -1538,6 +2299,26 @@ if (bridge) {
                     if (it.isDirectory) tr.addEventListener('dblclick', () => {
                         pathEl.value = it.fullName;
                         post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: it.fullName });
+                        // Add to history
+                        setTimeout(() => {
+                            if (sftpHistory[m.tabId]) {
+                                const hist = sftpHistory[m.tabId].remote;
+                                if (hist.history.length > 0 && hist.history[hist.history.length - 1] !== it.fullName) {
+                                    hist.history.push(it.fullName);
+                                    hist.index = hist.history.length - 1;
+                                    const backBtn = document.querySelector('.sftp-back-remote');
+                                    const forwardBtn = document.querySelector('.sftp-forward-remote');
+                                    if (backBtn) backBtn.disabled = hist.index <= 0;
+                                    if (forwardBtn) forwardBtn.disabled = hist.index >= hist.history.length - 1;
+                                }
+                                // Update bookmark button
+                                const bookmarkBtn = document.querySelector('.sftp-bookmark-remote');
+                                if (bookmarkBtn) {
+                                    const isBookmarked = sftpBookmarks.remote.includes(it.fullName);
+                                    bookmarkBtn.style.color = isBookmarked ? '#FFD700' : '';
+                                }
+                            }
+                        }, 0);
                     });
                     tr.addEventListener('contextmenu', (e) => {
                         e.preventDefault();
@@ -1551,7 +2332,7 @@ if (bridge) {
                 e.preventDefault();
                 e.stopPropagation();
                 showSftpMenu(e.clientX, e.clientY, { tabId: m.tabId, connId: m.connId, item: null, path: curPathFor() });
-            };          
+            };
         } else if (m.type === 'sftpUploadResult') {
             // legacy single-result fallback
             if (!m.ok) showToast('SFTP upload failed: ' + (m.message || 'error'), 4000);
@@ -1559,71 +2340,46 @@ if (bridge) {
         } else if (m.type === 'sftpDownloadResult') {
             if (!m.ok) showToast('SFTP download failed: ' + (m.message || 'error'), 4000);
             else showToast('Downloaded: ' + (m.localPath || ''), 3000);
+            if (m.remotePath) {
+                sftpAddTransfer(m.tabId, 'down', m.remotePath);
+                sftpAddTransfer(m.tabId, 'down', m.remotePath, m.ok ? 'done' : 'failed',
+                    { pct: m.ok ? 100 : undefined, text: m.ok ? 'done' : ('erro: ' + (m.message || '')) });
+            }
         } else if (m.type === 'sftpOpResult' ) {
             const names = { mkdir: 'Create Directory', delete: 'Delete', chmod: 'Change Permissions', rename: 'Rename', zip: 'Compress' };
             const op = names[m.op] || m.op;
             if (!m.ok) showToast(op + ' failed: ' + (m.message || 'error'), 4000);
-            else showToast(op + 'succeeded', 2500);
+            else showToast(op + ' succeeded', 2500);
         } else if (m.type === 'sftpUploadStarted') {
-            // create UI entries for each file
-            try {
-                const tabId = m.tabId;
-                const files = m.files || (m.file ? [m.file] : []);
-                const container = document.getElementById('sftp-progress-' + tabId);
-                if (!container) return;
-                container.innerHTML = '';
-                sftpProgress[tabId] = {};
-                const cancel = document.getElementById('sftp-cancel-' + tabId);
-                if (cancel) cancel.style.display = '';
-                files.forEach(f => {
-                    const ent = document.createElement('div'); ent.className = 'sftp-progress-item';
-                    const label = document.createElement('div'); label.className = 'sftp-progress-label'; label.textContent = f;
-                    const barWrap = document.createElement('div'); barWrap.className = 'sftp-progress-bar-wrap';
-                    const bar = document.createElement('div'); bar.className = 'sftp-progress-bar'; bar.style.width = '0%';
-                    barWrap.appendChild(bar);
-                    ent.appendChild(label); ent.appendChild(barWrap);
-                    container.appendChild(ent);
-                    sftpProgress[tabId][f] = { el: ent, bar, label };
-                });
-            } catch (_) {}
+            (m.files || (m.file ? [m.file] : [])).forEach(f => sftpAddTransfer(m.tabId, 'up', f));
         } else if (m.type === 'sftpUploadProgress') {
-            try {
-                const tabId = m.tabId;
-                const map = sftpProgress[tabId] || {};
-                const key = m.file;
-                const entry = map[key];
-                if (!entry) return;
-                const pct = m.total && m.total > 0 ? Math.floor((m.uploaded / m.total) * 100) : 0;
-                entry.bar.style.width = pct + '%';
-                entry.label.textContent = key + ' - ' + pct + '%';
-            } catch (_) {}
+            const pct = m.total && m.total > 0 ? Math.floor((m.uploaded / m.total) * 100) : 0;
+            sftpSetTransfer(m.tabId, 'up', m.file, 'running', { pct });
         } else if (m.type === 'sftpUploadFinished') {
-            try {
-                const tabId = m.tabId;
-                const map = sftpProgress[tabId] || {};
-                const key = m.file;
-                const entry = map[key];
-                if (entry) {
-                    if (m.ok) { entry.bar.style.width = '100%'; entry.label.textContent = key + ' - done'; }
-                    else { entry.label.textContent = key + ' - error: ' + (m.message || ''); entry.el.classList.add('failed'); }
-                    // remove after a short delay
-                    setTimeout(() => { try { entry.el.remove(); delete map[key]; } catch (_) {} }, 2500);
-                }
-                // if all done, clear container and hide cancel
-                if (Object.keys(map).length === 0) {
-                    const c = document.getElementById('sftp-progress-' + tabId); if (c) c.innerHTML = '';
-                    const cancel = document.getElementById('sftp-cancel-' + tabId); if (cancel) cancel.style.display = 'none';
-                }
-            } catch (_) {}
+            sftpSetTransfer(m.tabId, 'up', m.file, m.ok ? 'done' : 'failed',
+                { pct: m.ok ? 100 : undefined, message: m.message ? 'done' : ('erro: ' + (m.message || '')) });
+            // Refresh remote after upload finishes
+            if (m.ok && m.connId && m.path) {
+                post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: m.path });
+            }
+        } else if (m.type === 'sftpUploadFailed') {
+            sftpFinishAll(m.tabId, 'up', 'failed');
+            showToast('SFTP upload failed: ' + (m.message || 'error'), 4000);
         } else if (m.type === 'sftpUploadCanceled') {
-            try {
-                const tabId = m.tabId;
-                const c = document.getElementById('sftp-progress-' + tabId);
-                if (c) { const notice = document.createElement('div'); notice.className = 'sftp-progress-cancel'; notice.textContent = 'Upload canceled'; c.appendChild(notice); }
-                // cleanup map and hide cancel
-                delete sftpProgress[tabId];
-                const cancel = document.getElementById('sftp-cancel-' + tabId); if (cancel) cancel.style.display = 'none';
-            } catch (_) {}
+            sftpFinishAll(m.tabId, 'up', 'cancelled');
+        } else if (m.type === 'sftpDownloadStarted') {
+            (m.files || (m.file ? [m.file] : [])).forEach(f => sftpAddTransfer(m.tabId, 'down', f));
+        } else if (m.type === 'sftpDownloadProgress') {
+            const pct = m.total && m.total > 0 ? Math.floor((m.downloaded / m.total) * 100) : 0;
+            sftpSetTransfer(m.tabId, 'down', m.file, 'running', { pct });
+        } else if (m.type === 'sftpDownloadFinished') {
+            sftpSetTransfer(m.tabId, 'down', m.file, m.ok ? 'done' : 'failed',
+                { pct: m.ok ? 100 : undefined, message: m.message ? 'done' : ('erro: ' + (m.message || '')) });
+        } else if (m.type === 'sftpDownloadFailed') {
+            sftpFinishAll(m.tabId, 'down', 'failed');
+            showToast('SFTP download failed: ' + (m.message || 'error'), 4000);
+        } else if (m.type === 'sftpDownCanceled') {
+            sftpFinishAll(m.tabId, 'down', 'cancelled');
         } else if (m.type === 'sftpRefreshRemote') {
             post({ type: 'sftpListRemote', tabId: m.tabId, connId: m.connId, path: m.path });
         } else if (m.type === 'sftpRefreshLocal') {
@@ -1653,8 +2409,117 @@ if (bridge) {
                 }
             }
             if (s) updateTabRecIndicator(s.tabId);
+        } else if (m.type === 'sftpPreviewResult') {
+            // { tabId, contentType, data, error }
+            if (m.error) {
+                showToast('Preview failed: ' + m.error, 4000);
+                return;
+            }
+            showPreviewModal(m.tabId, m.contentType, m.data);
+        } else if (m.type === 'sftpDiskInfoResult') {
+            // { tabId, total, free, used, usedPct, error, isRemote, rawOutput }
+            const isRemote = m.isRemote === true;
+            const diskInfoEl = document.getElementById(isRemote ? 'sftp-disk-info-remote-' + m.tabId : 'sftp-disk-info-local-' + m.tabId);
+            if (!diskInfoEl) return;
+            if (m.error) {
+                diskInfoEl.textContent = 'Error: ' + m.error;
+                diskInfoEl.style.color = '#ff6b6b';
+                return;
+            }
+            if (isRemote) {
+                // Parse df output for remote
+                const lines = m.rawOutput.split('\n');
+                if (lines.length >= 2) {
+                    const parts = lines[1].split(/\s+/);
+                    if (parts.length >= 5) {
+                        const total = parts[1];
+                        const used = parts[2];
+                        const avail = parts[3];
+                        const usedPct = parts[4];
+                        diskInfoEl.textContent = avail + ' free (' + usedPct + ' used)';
+                        diskInfoEl.style.color = '#6b8cff';
+                    }
+                }
+            } else {
+                // Local disk info
+                const formatBytes = (bytes) => {
+                    if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+                    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+                    if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+                    return bytes + ' B';
+                };
+                diskInfoEl.textContent = formatBytes(m.free) + ' free (' + m.usedPct.toFixed(1) + '% used)';
+                diskInfoEl.style.color = '#6b8cff';
+            }
         } else if (m.type === 'logDirPicked') {
             try { console.log('[ui] logDirPicked:', m.path); } catch (_) { }
+        }
+    });
+}
+
+function showPreviewModal(tabId, contentType, data) {
+    closeTabMenu();
+    const modal = document.createElement('div');
+    modal.className = 'preview-modal';
+    modal.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: #1e1e1e;
+        border: 1px solid #3e3e3e;
+        border-radius: 8px;
+        padding: 20px;
+        max-width: 90vw;
+        max-height: 90vh;
+        overflow: auto;
+        z-index: 10000;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    `;
+    
+    const header = document.createElement('div');
+    header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;';
+    header.innerHTML = '<span style="color: #fff; font-weight: bold;">File Preview</span>';
+    
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.style.cssText = 'background: none; border: none; color: #fff; font-size: 24px; cursor: pointer; padding: 0 10px;';
+    closeBtn.onclick = () => modal.remove();
+    header.appendChild(closeBtn);
+    modal.appendChild(header);
+    
+    const content = document.createElement('div');
+    content.style.cssText = 'overflow: auto; max-height: 80vh;';
+    
+    if (contentType.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = 'data:' + contentType + ';base64,' + data;
+        img.style.cssText = 'max-width: 100%; max-height: 80vh; display: block; margin: 0 auto;';
+        content.appendChild(img);
+    } else {
+        const pre = document.createElement('pre');
+        pre.textContent = data;
+        pre.style.cssText = 'color: #d4d4d4; font-family: Consolas, monospace; font-size: 14px; white-space: pre-wrap; word-wrap: break-word; margin: 0;';
+        content.appendChild(pre);
+    }
+    
+    modal.appendChild(content);
+    document.body.appendChild(modal);
+    
+    // Close on escape
+    const onEsc = (e) => {
+        if (e.key === 'Escape') {
+            modal.remove();
+            document.removeEventListener('keydown', onEsc);
+        }
+    };
+    document.addEventListener('keydown', onEsc);
+    
+    // Close on click outside
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) {
+            modal.remove();
+            document.removeEventListener('keydown', onEsc);
         }
     });
 }

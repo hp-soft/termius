@@ -5,37 +5,55 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              mc:Ignorable="d"
              d:DesignHeight="400" d:DesignWidth="600">
+    <!-- Layout com duas linhas: conteúdo principal junto com status na linha de baixo -->
     <Grid>
-        <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="*" />
-            <ColumnDefinition Width="6" />
-            <ColumnDefinition Width="*" />
-        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <!-- Conteúdo principal (listas) ocupa todo o espaço disponível -->
+            <RowDefinition Height="*" />
+            <!-- Linha de status tem altura automática -->
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
 
-        <!-- Local file list -->
-        <ListView x:Name="LocalList" Grid.Column="0" AllowDrop="True"
-                  PreviewMouseLeftButtonDown="LocalList_PreviewMouseLeftButtonDown"
-                  Drop="LocalList_Drop"
-                  DragOver="LocalList_DragOver">
-            <ListView.View>
-                <GridView>
-                    <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" Width="300" />
-                </GridView>
-            </ListView.View>
-        </ListView>
+        <!-- Grid interno com colunas para as duas listas -->
+        <Grid Grid.Row="0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="6" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
 
-        <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="#222" ShowsPreview="True" />
+            <!-- Local file list -->
+            <ListView x:Name="LocalList" Grid.Column="0" AllowDrop="True"
+                      PreviewMouseLeftButtonDown="LocalList_PreviewMouseLeftButtonDown"
+                      Drop="LocalList_Drop"
+                      DragOver="LocalList_DragOver"
+                      VerticalAlignment="Stretch">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" Width="300" />
+                    </GridView>
+                </ListView.View>
+            </ListView>
 
-        <!-- Remote file list -->
-        <ListView x:Name="RemoteList" Grid.Column="2" AllowDrop="True"
-                  PreviewMouseLeftButtonDown="RemoteList_PreviewMouseLeftButtonDown"
-                  Drop="RemoteList_Drop"
-                  DragOver="RemoteList_DragOver">
-            <ListView.View>
-                <GridView>
-                    <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" Width="300" />
-                </GridView>
-            </ListView.View>
-        </ListView>
+            <GridSplitter Grid.Column="1" Width="6" HorizontalAlignment="Stretch" Background="#222" ShowsPreview="True" />
+
+            <!-- Remote file list -->
+            <ListView x:Name="RemoteList" Grid.Column="2" AllowDrop="True"
+                      PreviewMouseLeftButtonDown="RemoteList_PreviewMouseLeftButtonDown"
+                      Drop="RemoteList_Drop"
+                      DragOver="RemoteList_DragOver"
+                      VerticalAlignment="Stretch">
+                <ListView.View>
+                    <GridView>
+                        <GridViewColumn Header="Name" DisplayMemberBinding="{Binding Name}" Width="300" />
+                    </GridView>
+                </ListView.View>
+            </ListView>
+        </Grid>
+
+        <!-- Barra de status SFTP (exemplo simples) -->
+        <Border Grid.Row="1" Background="#0f1319" Padding="8,6" BorderThickness="0,1,0,0" BorderBrush="#222">
+            <TextBlock x:Name="SftpStatus" Foreground="#9fb0c8" FontSize="12" Text="Disconnected" />
+        </Border>
     </Grid>
 </UserControl>
