@@ -1653,6 +1653,22 @@ function showTabMenu(tabId, x, y) {
             { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
             { label: 'Close Tab', action: () => closeTab(tabId) },
         ];
+    } else if (t.label && t.label.startsWith('Git Bash')) {
+        // Git Bash tabs don't get Open SFTP option
+        items = [
+            { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
+            isLog
+                ? { label: 'Stop Recording', action: () => stopTabLogging(tabId) }
+                : { label: 'Start Recording', action: () => startTabLogging(tabId) },
+            isClip
+                ? { label: 'Stop Clip Capture', action: () => stopTabClipCapture(tabId) }
+                : { label: 'Start Clip Capture', action: () => startTabClipCapture(tabId) },
+            { sep: true },
+            { label: 'Open Log Directory', action: () => post({ type: 'openLogDir' }) },
+            { label: 'Setup Log Directory', action: () => post({ type: 'pickLogDir' }) },
+            { sep: true },
+            { label: 'Close Tab', action: () => closeTab(tabId) },
+        ];
     } else {
         items = [
             { label: 'Rename Tab', action: () => beginRenameTab(tabId) },
@@ -1891,6 +1907,19 @@ function buildRemoteMenu(ctx, it) {
                         post({ type: 'sftpTarZipRemote', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path });
                 }
             });
+            // Tar+Zip and Download for multi-select
+            items.push({
+                label: 'Tar + Zip and Download', action: () => {
+                    const archiveName = prompt('Archive name (e.g. archive.tar.gz):', 'archive.tar.gz');
+                    if (archiveName && archiveName.trim()) {
+                        // Get current local directory
+                        const localPathInput = document.getElementById('sftp-path-local-' + ctx.tabId);
+                        const localDir = (localPathInput && localPathInput.value) ? localPathInput.value : undefined;
+                        // First create the archive, then download it
+                        post({ type: 'sftpTarZipRemote', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path, downloadAfter: true, localDir: localDir });
+                    }
+                }
+            });
         }
         // Change permissions only for single selection
         if (!ctx.multiSelect) {
@@ -2037,6 +2066,19 @@ function buildLocalMenu(ctx, it) {
                     const archiveName = prompt('Archive name (e.g. archive.tar.gz):', 'archive.tar.gz');
                     if (archiveName && archiveName.trim())
                         post({ type: 'localTarZip', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path });
+                }
+            });
+            // Tar+Zip and Upload for multi-select (local)
+            items.push({
+                label: 'Tar + Zip and Upload', action: () => {
+                    const archiveName = prompt('Archive name (e.g. archive.tar.gz):', 'archive.tar.gz');
+                    if (archiveName && archiveName.trim()) {
+                        // Get current remote directory
+                        const remotePathInput = document.getElementById('sftp-path-remote-' + ctx.tabId);
+                        const remoteDir = (remotePathInput && remotePathInput.value) ? remotePathInput.value : '/';
+                        // First create the archive, then upload it
+                        post({ type: 'localTarZip', tabId: ctx.tabId, connId: ctx.connId, archiveName: archiveName.trim(), paths: selectedPaths, path: ctx.path, uploadAfter: true, remoteDir: remoteDir });
+                    }
                 }
             });
         }
@@ -2375,6 +2417,12 @@ if (bridge) {
         } else if (m.type === 'sftpDownloadFinished') {
             sftpSetTransfer(m.tabId, 'down', m.file, m.ok ? 'done' : 'failed',
                 { pct: m.ok ? 100 : undefined, message: m.message ? 'done' : ('erro: ' + (m.message || '')) });
+            // Refresh local directory after successful download
+            if (m.ok) {
+                const localPathInput = document.getElementById('sftp-path-local-' + m.tabId);
+                const localPath = localPathInput ? localPathInput.value : undefined;
+                post({ type: 'sftpListLocal', tabId: m.tabId, path: localPath });
+            }
         } else if (m.type === 'sftpDownloadFailed') {
             sftpFinishAll(m.tabId, 'down', 'failed');
             showToast('SFTP download failed: ' + (m.message || 'error'), 4000);

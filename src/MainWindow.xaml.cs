@@ -1374,6 +1374,8 @@ public partial class MainWindow : Window
         var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
         var archiveName = root.TryGetProperty("archiveName", out var an) ? an.GetString() ?? "" : "";
         var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "/" : "/";
+        var downloadAfter = root.TryGetProperty("downloadAfter", out var da) && da.GetBoolean();
+        var localDir = root.TryGetProperty("localDir", out var ld) ? ld.GetString() ?? "" : "";
         var paths = new List<string>();
         if (root.TryGetProperty("paths", out var p))
         {
@@ -1390,6 +1392,34 @@ public partial class MainWindow : Window
             sftp.TarZipRemote(archiveName, paths.ToArray(), parentPath);
             PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = true });
             PostToWeb(new { type = "sftpRefreshRemote", tabId, connId, path = parentPath });
+            
+            // If downloadAfter is true, trigger download using the existing download handler
+            if (downloadAfter)
+            {
+                var remoteArchivePath = parentPath.EndsWith("/") ? parentPath + archiveName : parentPath + "/" + archiveName;
+                var localPath = string.IsNullOrEmpty(localDir) ? remoteArchivePath : Path.Combine(localDir, archiveName);
+                var capturedLocalDir = localDir;
+                var capturedRemoteArchivePath = remoteArchivePath;
+                var capturedArchiveName = archiveName;
+                var capturedTabId = tabId;
+                var capturedConnId = connId;
+                // Schedule download after a short delay to ensure the file is ready
+                Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    // Call the download handler directly
+                    var downloadMsg = JsonSerializer.Serialize(new
+                    {
+                        type = "sftpDownload",
+                        tabId = capturedTabId,
+                        connId = capturedConnId,
+                        remotePath = capturedRemoteArchivePath,
+                        localDir = capturedLocalDir
+                    });
+                    var downloadRoot = JsonSerializer.Deserialize<JsonElement>(downloadMsg);
+                    HandleSftpDownload(downloadRoot);
+                });
+            }
         }
         catch (Exception ex)
         {
@@ -1425,6 +1455,8 @@ public partial class MainWindow : Window
         var tabId = root.TryGetProperty("tabId", out var t) ? t.GetString() ?? "" : "";
         var archiveName = root.TryGetProperty("archiveName", out var an) ? an.GetString() ?? "" : "";
         var parentPath = root.TryGetProperty("path", out var pp) ? pp.GetString() ?? "" : "";
+        var uploadAfter = root.TryGetProperty("uploadAfter", out var ua) && ua.GetBoolean();
+        var remoteDir = root.TryGetProperty("remoteDir", out var rd) ? rd.GetString() ?? "/" : "/";
         var paths = new List<string>();
         if (root.TryGetProperty("paths", out var p))
         {
@@ -1460,6 +1492,32 @@ public partial class MainWindow : Window
             }
             PostToWeb(new { type = "sftpOpResult", op = "tarzip", tabId, ok = true });
             PostToWeb(new { type = "sftpRefreshLocal", tabId, path = parentPath });
+            
+            // If uploadAfter is true, trigger upload using the existing upload handler
+            if (uploadAfter)
+            {
+                var connId = root.TryGetProperty("connId", out var c) ? c.GetString() ?? "" : "";
+                var capturedRemoteDir = remoteDir;
+                var capturedArchivePath = archivePath;
+                var capturedArchiveName = archiveName;
+                var capturedTabId = tabId;
+                // Schedule upload after a short delay to ensure the file is ready
+                Task.Run(async () =>
+                {
+                    await Task.Delay(500);
+                    // Call the upload handler directly
+                    var uploadMsg = JsonSerializer.Serialize(new
+                    {
+                        type = "sftpUpload",
+                        tabId = capturedTabId,
+                        connId,
+                        localPath = new[] { capturedArchivePath },
+                        remoteDir = capturedRemoteDir
+                    });
+                    var uploadRoot = JsonSerializer.Deserialize<JsonElement>(uploadMsg);
+                    HandleSftpUpload(uploadRoot);
+                });
+            }
         }
         catch (Exception ex)
         {
